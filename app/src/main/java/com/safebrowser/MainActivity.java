@@ -574,6 +574,14 @@ public class MainActivity extends Activity {
         menu.setHeaderTitle(link);
         menu.add(image ? "เปิดรูปในแท็บใหม่" : "เปิดในแท็บใหม่").setOnMenuItemClickListener(i -> { newTab(link); return true; });
         menu.add(image ? "คัดลอกที่อยู่รูป" : "คัดลอกลิงก์").setOnMenuItemClickListener(i -> { copy(link); return true; });
+        if (image) menu.add("ค้นหารูปนี้ด้วย Google Lens").setOnMenuItemClickListener(i -> {
+            newTab("https://lens.google.com/uploadbyurl?url=" + Uri.encode(link));
+            return true;
+        });
+        if (image) menu.add("ค้นหารูปนี้ด้วย Yandex").setOnMenuItemClickListener(i -> {
+            newTab("https://yandex.com/images/search?rpt=imageview&url=" + Uri.encode(link));
+            return true;
+        });
         if (image) menu.add("ดาวน์โหลดรูป").setOnMenuItemClickListener(i -> {
             confirmDownload(link, web.getSettings().getUserAgentString(), null, null);
             return true;
