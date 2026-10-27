@@ -18,6 +18,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.GradientDrawable;
@@ -25,6 +26,8 @@ import android.graphics.drawable.InsetDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
 import android.provider.Settings;
 import android.text.SpannableString;
@@ -35,6 +38,8 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MotionEvent;
+import android.view.PixelCopy;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
@@ -83,6 +88,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 public class MainActivity extends Activity {
     private static final String HOME = "https://www.google.com/";
@@ -414,6 +420,7 @@ public class MainActivity extends Activity {
             if (g.tabs.isEmpty()) entries.remove(g);
         } else entries.remove(w);
         thumbs.remove(w);
+        lensExact.remove(w);
         selected.remove(w);
         frame.removeView(w);
         w.destroy();
@@ -955,6 +962,7 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 if (!req.isForMainFrame()) return false;
                 Uri to = req.getUrl();
+                if (lensExactTab(view, to.toString())) return true;
                 if (!isWeb(to)) {
                     blocked("ลิงก์เปิดแอปอื่น (" + to.getScheme() + ":)");
                     return true;
@@ -973,6 +981,10 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageStarted(WebView view, String url, Bitmap icon) {
+                if (lensExactTab(view, url)) {
+                    view.stopLoading();
+                    return;
+                }
                 if (view == web && !bar.hasFocus()) bar.setText(url);
             }
 
@@ -1016,6 +1028,8 @@ public class MainActivity extends Activity {
                 customView = v;
                 customCallback = cb;
                 fullscreen.addView(v);
+                fullscreen.addView(fullscreenSearchButton(), new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
                 fullscreen.setVisibility(View.VISIBLE);
                 getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
@@ -1139,8 +1153,8 @@ public class MainActivity extends Activity {
             return true;
         });
         menu.add(image ? "คัดลอกที่อยู่รูป" : "คัดลอกลิงก์").setOnMenuItemClickListener(i -> { copy(link); return true; });
-        if (image) menu.add("ค้นหารูปนี้ด้วย Google Lens").setOnMenuItemClickListener(i -> {
-            lensSearchUrl(link, web.getUrl());
+        if (image) menu.add("ค้นหาที่มาของรูปนี้").setOnMenuItemClickListener(i -> {
+            searchImageUrl(link, web.getUrl());
             return true;
         });
         if (image) menu.add("ค้นหารูปนี้ด้วย Yandex").setOnMenuItemClickListener(i -> {
@@ -1153,7 +1167,9 @@ public class MainActivity extends Activity {
         });
     }
 
-    // ---- search by image (Google Lens) ----
+    // ---- search by image: find where a picture or video frame comes from ----
+
+    private final Set<WebView> lensExact = new HashSet<>();
 
     private void chooseImageSearch() {
         new AlertDialog.Builder(this)
@@ -1174,15 +1190,69 @@ public class MainActivity extends Activity {
         }
     }
 
-    // Freezes the visible page and lets the user drag a box over the part to search for.
     private void startCrop() {
-        if (web.getWidth() == 0 || web.getHeight() == 0) return;
         hideKeyboard(bar);
-        Bitmap shot = Bitmap.createBitmap(web.getWidth(), web.getHeight(), Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(shot);
-        c.translate(-web.getScrollX(), -web.getScrollY());
-        web.draw(c);
+        captureScreen(web, this::showCrop);
+    }
 
+    private Button fullscreenSearchButton() {
+        Button b = new Button(this);
+        b.setText("ค้นหาภาพนี้");
+        b.setTextColor(0xFFFFFFFF);
+        b.setBackground(box(0x99000000, 0x66FFFFFF, 1, 20));
+        b.setOnClickListener(v -> {
+            b.setVisibility(View.INVISIBLE); // keep the button itself out of the shot
+            fullscreen.postDelayed(() -> captureScreen(customView, shot -> {
+                b.setVisibility(View.VISIBLE);
+                showCrop(shot);
+            }), 80);
+        });
+        return b;
+    }
+
+    // Copies what is actually on screen. A software draw() of a WebView leaves playing video black,
+    // because video is composited on the GPU; PixelCopy reads the real frame instead.
+    private void captureScreen(View target, Consumer<Bitmap> done) {
+        if (target == null || target.getWidth() == 0 || target.getHeight() == 0) return;
+        Handler main = new Handler(Looper.getMainLooper());
+        SurfaceView surface = findSurface(target);
+        if (surface != null && surface.getHolder().getSurface().isValid() && surface.getWidth() > 0) {
+            // fullscreen players may render into their own SurfaceView, which a window copy can't see
+            Bitmap shot = Bitmap.createBitmap(surface.getWidth(), surface.getHeight(), Bitmap.Config.ARGB_8888);
+            PixelCopy.request(surface, shot, r -> {
+                if (r == PixelCopy.SUCCESS) done.accept(shot);
+                else copyWindow(target, done, main);
+            }, main);
+        } else copyWindow(target, done, main);
+    }
+
+    private void copyWindow(View target, Consumer<Bitmap> done, Handler main) {
+        int[] at = new int[2];
+        target.getLocationInWindow(at);
+        Bitmap shot = Bitmap.createBitmap(target.getWidth(), target.getHeight(), Bitmap.Config.ARGB_8888);
+        PixelCopy.request(getWindow(), new Rect(at[0], at[1], at[0] + target.getWidth(), at[1] + target.getHeight()), shot, r -> {
+            if (r != PixelCopy.SUCCESS) {
+                Canvas c = new Canvas(shot);
+                c.translate(-target.getScrollX(), -target.getScrollY());
+                target.draw(c);
+            }
+            done.accept(shot);
+        }, main);
+    }
+
+    private static SurfaceView findSurface(View v) {
+        if (v instanceof SurfaceView) return (SurfaceView) v;
+        if (!(v instanceof ViewGroup)) return null;
+        for (int i = 0; i < ((ViewGroup) v).getChildCount(); i++) {
+            SurfaceView s = findSurface(((ViewGroup) v).getChildAt(i));
+            if (s != null) return s;
+        }
+        return null;
+    }
+
+    // Shows a frozen screenshot and lets the user drag a box over the part to search for.
+    private void showCrop(Bitmap shot) {
+        closeCrop();
         float d = getResources().getDisplayMetrics().density;
         CropView crop = new CropView(this, shot);
         LinearLayout layer = new LinearLayout(this);
@@ -1204,7 +1274,7 @@ public class MainActivity extends Activity {
         go.setOnClickListener(v -> {
             Bitmap picked = crop.crop();
             closeCrop();
-            lensSearch(picked);
+            searchImage(picked);
         });
         buttons.addView(cancel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         buttons.addView(go, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -1220,10 +1290,10 @@ public class MainActivity extends Activity {
         cropLayer = null;
     }
 
-    // Long-pressed image: fetch it ourselves (with the page's cookies) so Lens gets the actual pixels,
-    // which also works for images Lens can't download on its own.
-    private void lensSearchUrl(String imageUrl, String referer) {
-        toast("กำลังส่งรูปไปค้นหา");
+    // Long-pressed image: fetch it ourselves (with the page's cookies) so the search gets the actual pixels,
+    // which also works for images the search engine can't download on its own.
+    private void searchImageUrl(String imageUrl, String referer) {
+        toast("กำลังโหลดรูป");
         String ua = web.getSettings().getUserAgentString();
         String cookie = CookieManager.getInstance().getCookie(imageUrl);
         Group g = groupOf(web);
@@ -1240,21 +1310,39 @@ public class MainActivity extends Activity {
                     b = decodeScaled(readAll(in));
                 }
                 if (b == null) throw new IOException("not an image");
-                runOnUiThread(() -> lensSearch(b));
+                runOnUiThread(() -> searchImage(b));
             } catch (IOException | RuntimeException e) {
                 runOnUiThread(() -> newTab("https://lens.google.com/uploadbyurl?url=" + Uri.encode(imageUrl), g, true));
             }
         }).start();
     }
 
-    // Uploads the picture to Lens the same way lens.google.com's own upload does: a multipart form with
-    // field encoded_image. Lens answers with a redirect to visual-match results (similar content, any size).
-    private void lensSearch(Bitmap b) {
+    private void searchImage(Bitmap b) {
+        String b64 = jpegBase64(b);
+        new AlertDialog.Builder(this)
+                .setTitle("ค้นหาด้วย")
+                .setItems(new String[]{
+                        "Google Lens: ภาพที่ตรงกันเป๊ะ (หาที่มา)",
+                        "Google Lens: ภาพที่คล้ายกัน",
+                        "Bing: หน้าเว็บที่มีภาพนี้"}, (d, i) -> {
+                    if (i == 2) bingUpload(b64);
+                    else lensUpload(b64, i == 0);
+                })
+                .setNegativeButton("ยกเลิก", null)
+                .show();
+    }
+
+    private static String jpegBase64(Bitmap b) {
         float scale = Math.min(1f, 1600f / Math.max(b.getWidth(), b.getHeight()));
         if (scale < 1f) b = Bitmap.createScaledBitmap(b, Math.round(b.getWidth() * scale), Math.round(b.getHeight() * scale), true);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         b.compress(Bitmap.CompressFormat.JPEG, 90, out);
-        String b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+    }
+
+    // Uploads the picture to Lens the same way lens.google.com's own upload does: a multipart form with
+    // field encoded_image. Lens redirects to its visual matches (udm=26); exact mode swaps that for udm=48.
+    private void lensUpload(String b64, boolean exact) {
         String html = "<!doctype html><meta name=viewport content='width=device-width'><body style='font-family:sans-serif;padding:24px'>"
                 + "กำลังส่งรูปไปค้นหา…<form id=f method=post enctype='multipart/form-data' "
                 + "action='https://lens.google.com/v3/upload?hl=th&st=" + System.currentTimeMillis() + "'>"
@@ -1263,7 +1351,24 @@ public class MainActivity extends Activity {
                 + "var t=new DataTransfer();t.items.add(new File([a],'image.jpg',{type:'image/jpeg'}));"
                 + "document.getElementById('i').files=t.files;document.getElementById('f').submit();</script>";
         WebView w = newTab("about:blank", groupOf(web), true);
+        if (exact) lensExact.add(w);
         w.loadDataWithBaseURL("https://lens.google.com/", html, "text/html", "utf-8", null);
+    }
+
+    // Lens's redirect lands on visual matches; for exact mode reopen the same result on the exact-match tab.
+    private boolean lensExactTab(WebView view, String url) {
+        if (!lensExact.contains(view) || url == null || !url.contains("udm=26")) return false;
+        Uri u = Uri.parse(url);
+        if (!isGoogle(u.getHost()) || !"/search".equals(u.getPath())) return false;
+        lensExact.remove(view);
+        view.post(() -> view.loadUrl(url.replace("udm=26", "udm=48")));
+        return true;
+    }
+
+    // Bing Visual Search takes the image as a base64 form field
+    private void bingUpload(String b64) {
+        WebView w = newTab("about:blank", groupOf(web), true);
+        w.postUrl("https://www.bing.com/images/search?view=detailv2&iss=sbiupload", ("imageBin=" + Uri.encode(b64)).getBytes());
     }
 
     private static byte[] readAll(InputStream in) throws IOException {
@@ -1552,7 +1657,7 @@ public class MainActivity extends Activity {
 
     private void exitFullscreen() {
         if (customView == null) return;
-        fullscreen.removeView(customView);
+        fullscreen.removeAllViews(); // the video and our search button
         fullscreen.setVisibility(View.GONE);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
         customCallback.onCustomViewHidden();
@@ -1566,7 +1671,7 @@ public class MainActivity extends Activity {
             try (InputStream in = getContentResolver().openInputStream(data.getData())) {
                 Bitmap b = in == null ? null : decodeScaled(readAll(in));
                 if (b == null) toast("เปิดรูปนี้ไม่ได้");
-                else lensSearch(b);
+                else searchImage(b);
             } catch (IOException | RuntimeException e) {
                 toast("เปิดรูปนี้ไม่ได้");
             }
