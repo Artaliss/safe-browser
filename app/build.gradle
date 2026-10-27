@@ -6,9 +6,9 @@ android {
     defaultConfig {
         applicationId 'com.safebrowser'
         minSdk 29
-        targetSdk 34
-        versionCode 3
-        versionName '2.1'
+        targetSdk 32 // 33+ turns setForceDark into a no-op
+        versionCode 4
+        versionName '2.2'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

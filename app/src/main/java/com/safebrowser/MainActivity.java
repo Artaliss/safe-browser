@@ -11,7 +11,6 @@ import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Message;
@@ -26,6 +25,7 @@ import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
@@ -41,8 +41,14 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONException;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class MainActivity extends Activity {
     private static final String HOME = "https://www.google.com/";
@@ -59,6 +65,21 @@ public class MainActivity extends Activity {
     private ProgressBar progress;
     private SharedPreferences prefs;
     private boolean dark;
+    private final Set<String> adHosts = new HashSet<>();
+
+    // Removes full-screen click-hijack layers (transparent links, ad iframes, empty boxes) a few times while the page settles.
+    private static final String UNCOVER_AUTO = "(function(){function k(){var w=innerWidth,h=innerHeight;"
+            + "document.querySelectorAll('body a,body div,body iframe').forEach(function(e){var s=getComputedStyle(e);"
+            + "if(s.position!=='fixed'||(parseInt(s.zIndex)||0)<100)return;var r=e.getBoundingClientRect();"
+            + "if(r.width<w*.8||r.height<h*.8)return;"
+            + "if(e.tagName!=='DIV'||(!(e.innerText||'').trim()&&!e.querySelector('video,img,canvas')))e.remove();});}"
+            + "k();var n=0,t=setInterval(function(){k();if(++n>10)clearInterval(t)},1500);})()";
+    // Manual version from the menu: drops every big fixed layer and unlocks scrolling.
+    private static final String UNCOVER_ALL = "(function(){var w=innerWidth,h=innerHeight,c=0;"
+            + "document.querySelectorAll('body *').forEach(function(e){var s=getComputedStyle(e);"
+            + "if(s.position!=='fixed'&&s.position!=='sticky')return;var r=e.getBoundingClientRect();"
+            + "if(r.width*r.height>w*h*.3){e.remove();c++;}});"
+            + "document.body.style.overflow=document.documentElement.style.overflow='auto';return c;})()";
     private ValueCallback<Uri[]> fileCallback;
     private View customView;
     private WebChromeClient.CustomViewCallback customCallback;
@@ -80,6 +101,10 @@ public class MainActivity extends Activity {
         findBar = findViewById(R.id.findbar);
         findText = findViewById(R.id.findtext);
         findCount = findViewById(R.id.findcount);
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(getResources().openRawResource(R.raw.adhosts)))) {
+            for (String line; (line = r.readLine()) != null; ) if (!line.trim().isEmpty() && !line.startsWith("#")) adHosts.add(line.trim());
+        } catch (IOException ignored) {
+        }
 
         bar.setOnEditorActionListener((v, id, ev) -> {
             if (id == EditorInfo.IME_ACTION_GO || (ev != null && ev.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
@@ -188,9 +213,8 @@ public class MainActivity extends Activity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         s.setBuiltInZoomControls(true);
         s.setDisplayZoomControls(false);
-        // darkens sites that have no dark style of their own
-        if (dark && Build.VERSION.SDK_INT >= 33) s.setAlgorithmicDarkening(true);
-        else if (dark) s.setForceDark(WebSettings.FORCE_DARK_ON);
+        // darkens sites that have no dark style of their own; only honoured while targetSdk <= 32
+        if (dark) s.setForceDark(WebSettings.FORCE_DARK_ON);
 
         w.setWebViewClient(new WebViewClient() {
             @Override
@@ -219,9 +243,16 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                if (!isAd(req.getUrl().getHost(), adHosts)) return null;
+                return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 if (view == web && !bar.hasFocus()) bar.setText(url);
                 addHistory(view.getTitle(), url);
+                view.evaluateJavascript(UNCOVER_AUTO, null);
             }
         });
 
@@ -383,6 +414,8 @@ public class MainActivity extends Activity {
         add(m, "ค้นหาในหน้า", this::openFind);
         add(m, "แชร์", this::share);
         add(m, desktop ? "✓ เวอร์ชันเดสก์ท็อป" : "เวอร์ชันเดสก์ท็อป", this::toggleDesktop);
+        add(m, "เอาสิ่งที่บังจอออก", () -> web.evaluateJavascript(UNCOVER_ALL,
+                n -> toast("0".equals(n) ? "ไม่เจออะไรบังจอ" : "เอาออกแล้ว " + n + " ชิ้น")));
         add(m, "โหมดมืด", this::chooseDark);
         add(m, "หน้าแรก", () -> web.loadUrl(HOME));
         p.show();
@@ -557,6 +590,14 @@ public class MainActivity extends Activity {
         if (t.matches("(?i)https?://.*")) return t;
         if (!t.contains(" ") && t.matches("[^/]+\\.[a-zA-Z]{2,}(/.*)?")) return "https://" + t;
         return "https://www.google.com/search?q=" + Uri.encode(t);
+    }
+
+    static boolean isAd(String host, Set<String> list) {
+        if (host == null) return false;
+        for (String h = host.toLowerCase(); ; h = h.substring(h.indexOf('.') + 1)) {
+            if (list.contains(h)) return true;
+            if (h.indexOf('.') < 0) return false;
+        }
     }
 
     static boolean isGoogle(String host) {

@@ -12,4 +12,13 @@ public class DomainTest {
         assertFalse(MainActivity.sameSite("example.com", "evil-ads.net"));
         assertTrue(MainActivity.isGoogle("www.google.com"));
     }
+
+    @Test public void isAd() {
+        java.util.Set<String> list = java.util.Set.of("doubleclick.net", "popads.net");
+        assertTrue(MainActivity.isAd("doubleclick.net", list));
+        assertTrue(MainActivity.isAd("stats.g.doubleclick.net", list));
+        assertFalse(MainActivity.isAd("notdoubleclick.net", list));
+        assertFalse(MainActivity.isAd("example.com", list));
+        assertFalse(MainActivity.isAd(null, list));
+    }
 }
