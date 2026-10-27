@@ -4,10 +4,14 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -17,6 +21,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Message;
+import android.provider.Settings;
 import android.view.ContextMenu;
 import android.view.KeyEvent;
 import android.view.Menu;
@@ -47,11 +52,14 @@ import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -156,6 +164,93 @@ public class MainActivity extends Activity {
         if (tabs.isEmpty()) newTab(HOME);
         else select(tabs.get(Math.min(prefs.getInt("tab", 0), tabs.size() - 1)));
         if (saved == null) handleIntent(getIntent()); // recreate() would reopen the same link
+        if (System.currentTimeMillis() - prefs.getLong("lastUpdateCheck", 0) > 6 * 3600_000L) checkUpdate(false);
+    }
+
+    // ---- self-update from GitHub Releases ----
+
+    private static final String RELEASES = "https://api.github.com/repos/Artaliss/safe-browser/releases/latest";
+    private static final String DOWNLOAD_PREFIX = "https://github.com/Artaliss/safe-browser/releases/download/";
+
+    private long installedVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode();
+        } catch (PackageManager.NameNotFoundException e) {
+            return 0;
+        }
+    }
+
+    private void checkUpdate(boolean manual) {
+        prefs.edit().putLong("lastUpdateCheck", System.currentTimeMillis()).apply();
+        new Thread(() -> {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(RELEASES).openConnection();
+                c.setRequestProperty("Accept", "application/vnd.github+json");
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(10000);
+                if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
+                StringBuilder sb = new StringBuilder();
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream()))) {
+                    for (String line; (line = r.readLine()) != null; ) sb.append(line);
+                }
+                JSONObject rel = new JSONObject(sb.toString());
+                long latest = Long.parseLong(rel.getString("tag_name").substring(1));
+                String apk = rel.getJSONArray("assets").getJSONObject(0).getString("browser_download_url");
+                String notes = rel.optString("body");
+                runOnUiThread(() -> {
+                    if (latest > installedVersion() && apk.startsWith(DOWNLOAD_PREFIX)) offerUpdate(latest, apk, notes);
+                    else if (manual) toast("เป็นเวอร์ชันล่าสุดแล้ว (build " + installedVersion() + ")");
+                });
+            } catch (IOException | JSONException | RuntimeException e) {
+                if (manual) runOnUiThread(() -> toast("เช็กอัปเดตไม่ได้: " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void offerUpdate(long build, String apk, String notes) {
+        new AlertDialog.Builder(this)
+                .setTitle("มีเวอร์ชันใหม่ (build " + build + ")")
+                .setMessage(notes.isEmpty() ? "อัปเดตเลยไหม" : notes)
+                .setPositiveButton("อัปเดต", (d, w) -> downloadUpdate(apk))
+                .setNegativeButton("ไว้ทีหลัง", null)
+                .show();
+    }
+
+    private void downloadUpdate(String apk) {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("ต้องอนุญาตก่อน")
+                    .setMessage("เปิด \"อนุญาตจากแหล่งนี้\" ให้ Safe Browser แล้วกลับมากดอัปเดตอีกครั้ง")
+                    .setPositiveButton("ไปที่ตั้งค่า", (d, w) -> startActivity(new Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()))))
+                    .setNegativeButton("ยกเลิก", null)
+                    .show();
+            return;
+        }
+        java.io.File old = new java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk");
+        if (old.exists()) old.delete();
+        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        long id = dm.enqueue(new DownloadManager.Request(Uri.parse(apk))
+                .setTitle("Safe Browser update")
+                .setMimeType("application/vnd.android.package-archive")
+                .setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "update.apk"));
+        toast("กำลังโหลดอัปเดต");
+        registerReceiver(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context ctx, Intent i) {
+                if (i.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1) != id) return;
+                unregisterReceiver(this);
+                Uri file = dm.getUriForDownloadedFile(id);
+                if (file == null) {
+                    toast("โหลดอัปเดตไม่สำเร็จ");
+                    return;
+                }
+                // Android itself refuses the install unless the APK is signed with the same key as this app
+                startActivity(new Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(file, "application/vnd.android.package-archive")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+        }, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
     }
 
     @Override
@@ -496,6 +591,7 @@ public class MainActivity extends Activity {
         add(m, "เอาสิ่งที่บังจอออก", () -> web.evaluateJavascript(UNCOVER_ALL,
                 n -> toast("0".equals(n) ? "ไม่เจออะไรบังจอ" : "เอาออกแล้ว " + n + " ชิ้น")));
         add(m, "โหมดมืด", this::chooseDark);
+        add(m, "เช็กอัปเดต (build " + installedVersion() + ")", () -> checkUpdate(true));
         add(m, "หน้าแรก", () -> web.loadUrl(HOME));
         p.show();
     }

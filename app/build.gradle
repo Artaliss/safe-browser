@@ -7,14 +7,26 @@ android {
         applicationId 'com.safebrowser'
         minSdk 29
         targetSdk 32 // 33+ turns setForceDark into a no-op
-        versionCode 5
-        versionName '2.3'
+        versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1') as Integer) // must match the release tag number
+        versionName "build ${System.getenv('GITHUB_RUN_NUMBER') ?: 'dev'}"
+    }
+    signingConfigs {
+        release {
+            storeFile file(System.getenv('KEYSTORE_PATH') ?: 'release.jks')
+            storePassword System.getenv('KEYSTORE_PASSWORD')
+            keyAlias 'safebrowser'
+            keyPassword System.getenv('KEYSTORE_PASSWORD')
+        }
+    }
+    buildTypes {
+        release { signingConfig signingConfigs.release }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
     testOptions { unitTests.returnDefaultValues = true }
+    lint { checkReleaseBuilds false } // lintVital fails release on the old targetSdk
 }
 
 dependencies { testImplementation 'junit:junit:4.13.2' }

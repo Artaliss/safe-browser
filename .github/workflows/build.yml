@@ -1,5 +1,10 @@
 name: build-apk
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -9,6 +14,18 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: gradle/actions/setup-gradle@v3
         with: { gradle-version: '8.7' }
-      - run: gradle testDebugUnitTest assembleDebug
+      - run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+      - run: gradle testReleaseUnitTest assembleRelease
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      - run: cp app/build/outputs/apk/release/app-release.apk SafeBrowser.apk
+      # the app polls releases/latest and compares the tag number with its versionCode
+      - run: gh release create "v$GITHUB_RUN_NUMBER" SafeBrowser.apk --title "Build $GITHUB_RUN_NUMBER" --notes "$NOTES"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ github.event.head_commit.message }}
       - uses: actions/upload-artifact@v4
-        with: { name: SafeBrowser-apk, path: app/build/outputs/apk/debug/app-debug.apk }
+        with: { name: SafeBrowser-apk, path: SafeBrowser.apk }
