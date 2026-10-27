@@ -4,7 +4,7 @@
     <application
         android:label="Safe Browser"
         android:icon="@android:drawable/ic_menu_search"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/Light"
         android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"

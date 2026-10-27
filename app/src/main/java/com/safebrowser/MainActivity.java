@@ -8,8 +8,10 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Message;
@@ -56,12 +58,18 @@ public class MainActivity extends Activity {
     private Button tabCount;
     private ProgressBar progress;
     private SharedPreferences prefs;
+    private boolean dark;
     private ValueCallback<Uri[]> fileCallback;
     private View customView;
     private WebChromeClient.CustomViewCallback customCallback;
 
     @Override
     protected void onCreate(Bundle saved) {
+        prefs = getSharedPreferences("browser", MODE_PRIVATE);
+        int mode = prefs.getInt("dark", 0); // 0 = follow system, 1 = on, 2 = off
+        dark = mode == 1 || (mode == 0 && (getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES);
+        setTheme(dark ? R.style.Dark : R.style.Light);
         super.onCreate(saved);
         setContentView(R.layout.main);
         frame = findViewById(R.id.frame);
@@ -72,7 +80,6 @@ public class MainActivity extends Activity {
         findBar = findViewById(R.id.findbar);
         findText = findViewById(R.id.findtext);
         findCount = findViewById(R.id.findcount);
-        prefs = getSharedPreferences("browser", MODE_PRIVATE);
 
         bar.setOnEditorActionListener((v, id, ev) -> {
             if (id == EditorInfo.IME_ACTION_GO || (ev != null && ev.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
@@ -98,7 +105,7 @@ public class MainActivity extends Activity {
         for (int i = 0; i < open.length(); i++) newTab(open.optString(i));
         if (tabs.isEmpty()) newTab(HOME);
         else select(tabs.get(Math.min(prefs.getInt("tab", 0), tabs.size() - 1)));
-        handleIntent(getIntent());
+        if (saved == null) handleIntent(getIntent()); // recreate() would reopen the same link
     }
 
     @Override
@@ -181,6 +188,9 @@ public class MainActivity extends Activity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         s.setBuiltInZoomControls(true);
         s.setDisplayZoomControls(false);
+        // darkens sites that have no dark style of their own
+        if (dark && Build.VERSION.SDK_INT >= 33) s.setAlgorithmicDarkening(true);
+        else if (dark) s.setForceDark(WebSettings.FORCE_DARK_ON);
 
         w.setWebViewClient(new WebViewClient() {
             @Override
@@ -373,8 +383,20 @@ public class MainActivity extends Activity {
         add(m, "ค้นหาในหน้า", this::openFind);
         add(m, "แชร์", this::share);
         add(m, desktop ? "✓ เวอร์ชันเดสก์ท็อป" : "เวอร์ชันเดสก์ท็อป", this::toggleDesktop);
+        add(m, "โหมดมืด", this::chooseDark);
         add(m, "หน้าแรก", () -> web.loadUrl(HOME));
         p.show();
+    }
+
+    private void chooseDark() {
+        new AlertDialog.Builder(this)
+                .setTitle("โหมดมืด")
+                .setSingleChoiceItems(new String[]{"ตามระบบ", "เปิด", "ปิด"}, prefs.getInt("dark", 0), (d, i) -> {
+                    prefs.edit().putInt("dark", i).apply();
+                    d.dismiss();
+                    recreate(); // onPause saves the open tabs first
+                })
+                .show();
     }
 
     private static void add(Menu m, String title, Runnable action) {
