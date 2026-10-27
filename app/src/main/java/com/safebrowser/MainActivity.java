@@ -10,6 +10,9 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.InsetDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -18,6 +21,7 @@ import android.view.ContextMenu;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
@@ -30,9 +34,12 @@ import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.GridView;
+import android.widget.ImageView;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -46,8 +53,10 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class MainActivity extends Activity {
@@ -62,6 +71,11 @@ public class MainActivity extends Activity {
     private TextView findCount;
     private View findBar;
     private Button tabCount;
+    private View switcher;
+    private TextView switcherTitle;
+    private GridView tabGrid;
+    private final TabAdapter tabAdapter = new TabAdapter();
+    private final Map<WebView, Bitmap> thumbs = new HashMap<>();
     private ProgressBar progress;
     private SharedPreferences prefs;
     private boolean dark;
@@ -116,6 +130,17 @@ public class MainActivity extends Activity {
             return false;
         });
         tabCount.setOnClickListener(v -> showTabs());
+        int ink = tabCount.getCurrentTextColor();
+        tabCount.setBackground(new InsetDrawable(box(0, ink, 2, 5), Math.round(12 * getResources().getDisplayMetrics().density)));
+        switcher = findViewById(R.id.switcher);
+        switcherTitle = findViewById(R.id.switchertitle);
+        tabGrid = findViewById(R.id.tabgrid);
+        tabGrid.setAdapter(tabAdapter);
+        findViewById(R.id.newtab).setOnClickListener(v -> {
+            newTab(HOME);
+            switcher.setVisibility(View.GONE);
+        });
+        findViewById(R.id.closeall).setOnClickListener(v -> closeAllTabs());
         findViewById(R.id.menu).setOnClickListener(this::showMenu);
         findText.setOnEditorActionListener((v, id, ev) -> {
             web.findAllAsync(findText.getText().toString());
@@ -163,6 +188,7 @@ public class MainActivity extends Activity {
     }
 
     private void select(WebView w) {
+        if (web != null && web != w && tabs.contains(web)) thumbs.put(web, snapshot(web));
         web = w;
         frame.removeAllViews();
         frame.addView(w);
@@ -175,27 +201,80 @@ public class MainActivity extends Activity {
 
     private void closeTab(WebView w) {
         tabs.remove(w);
+        thumbs.remove(w);
         frame.removeView(w);
         w.destroy();
         if (tabs.isEmpty()) newTab(HOME);
         else if (w == web) select(tabs.get(tabs.size() - 1));
         else tabCount.setText(String.valueOf(tabs.size()));
+        if (switcher.getVisibility() == View.VISIBLE) showTabs();
     }
 
-    private void showTabs() {
-        String[] names = new String[tabs.size()];
-        for (int i = 0; i < names.length; i++) {
-            WebView w = tabs.get(i);
-            String t = w.getTitle() == null || w.getTitle().isEmpty() ? String.valueOf(w.getUrl()) : w.getTitle();
-            names[i] = (w == web ? "▶ " : "") + t;
+    private void closeAllTabs() {
+        for (WebView w : new ArrayList<>(tabs)) {
+            tabs.remove(w);
+            frame.removeView(w);
+            w.destroy();
         }
-        new AlertDialog.Builder(this)
-                .setTitle("แท็บ (" + tabs.size() + ")")
-                .setItems(names, (d, i) -> select(tabs.get(i)))
-                .setPositiveButton("แท็บใหม่", (d, i) -> newTab(HOME))
-                .setNeutralButton("ปิดแท็บนี้", (d, i) -> closeTab(web))
-                .setNegativeButton("ปิด", null)
-                .show();
+        thumbs.clear();
+        web = null;
+        newTab(HOME);
+        switcher.setVisibility(View.GONE);
+    }
+
+    // Chrome-style grid of tab cards with a screenshot of each page
+    private void showTabs() {
+        thumbs.put(web, snapshot(web));
+        hideKeyboard(bar);
+        switcherTitle.setText("แท็บ " + tabs.size());
+        tabAdapter.notifyDataSetChanged();
+        switcher.setVisibility(View.VISIBLE);
+        tabGrid.setSelection(tabs.indexOf(web));
+    }
+
+    private static Bitmap snapshot(WebView w) {
+        if (w.getWidth() == 0 || w.getHeight() == 0) return null;
+        Bitmap b = Bitmap.createBitmap(w.getWidth() / 3, w.getHeight() / 3, Bitmap.Config.RGB_565);
+        Canvas c = new Canvas(b);
+        c.scale(1 / 3f, 1 / 3f);
+        c.translate(-w.getScrollX(), -w.getScrollY());
+        w.draw(c);
+        return b;
+    }
+
+    private GradientDrawable box(int fill, int stroke, float strokeDp, float radiusDp) {
+        float d = getResources().getDisplayMetrics().density;
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(fill);
+        g.setStroke(Math.round(strokeDp * d), stroke);
+        g.setCornerRadius(radiusDp * d);
+        return g;
+    }
+
+    private class TabAdapter extends BaseAdapter {
+        @Override public int getCount() { return tabs.size(); }
+        @Override public Object getItem(int i) { return tabs.get(i); }
+        @Override public long getItemId(int i) { return tabs.get(i).hashCode(); }
+
+        @Override
+        public View getView(int i, View v, ViewGroup parent) {
+            if (v == null) v = getLayoutInflater().inflate(R.layout.tab_card, parent, false);
+            WebView w = tabs.get(i);
+            boolean current = w == web;
+            String t = w.getTitle() == null || w.getTitle().isEmpty() ? String.valueOf(w.getUrl()) : w.getTitle();
+            ((TextView) v.findViewById(R.id.cardtitle)).setText(t);
+            ImageView img = v.findViewById(R.id.cardthumb);
+            img.setImageBitmap(thumbs.get(w));
+            img.setContentDescription(t);
+            v.setBackground(box(dark ? 0xFF303134 : 0xFFFFFFFF,
+                    current ? 0xFF1A73E8 : (dark ? 0xFF5F6368 : 0xFFDADCE0), current ? 3 : 1, 12));
+            v.setOnClickListener(x -> {
+                select(w);
+                switcher.setVisibility(View.GONE);
+            });
+            v.findViewById(R.id.cardclose).setOnClickListener(x -> closeTab(w));
+            return v;
+        }
     }
 
     // ---- WebView setup ----
@@ -557,6 +636,7 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         if (customView != null) exitFullscreen();
+        else if (switcher.getVisibility() == View.VISIBLE) switcher.setVisibility(View.GONE);
         else if (findBar.getVisibility() == View.VISIBLE) closeFind();
         else if (web.canGoBack()) web.goBack();
         else if (tabs.size() > 1) closeTab(web);

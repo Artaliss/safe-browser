@@ -105,6 +105,57 @@
             android:layout_weight="1" />
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/switcher"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="?android:attr/colorBackground"
+        android:clickable="true"
+        android:orientation="vertical"
+        android:visibility="gone">
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="6dp">
+            <TextView
+                android:id="@+id/switchertitle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingStart="10dp"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+            <Button
+                android:id="@+id/closeall"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:text="ปิดทั้งหมด" />
+            <Button
+                android:id="@+id/newtab"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:minWidth="0dp"
+                android:contentDescription="แท็บใหม่"
+                android:text="＋"
+                android:textSize="24sp" />
+        </LinearLayout>
+        <GridView
+            android:id="@+id/tabgrid"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:horizontalSpacing="12dp"
+            android:numColumns="2"
+            android:padding="12dp"
+            android:stretchMode="columnWidth"
+            android:verticalSpacing="12dp" />
+    </LinearLayout>
+
     <FrameLayout
         android:id="@+id/fullscreen"
         android:layout_width="match_parent"
