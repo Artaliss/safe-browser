@@ -64,6 +64,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -600,10 +601,36 @@ public class MainActivity extends Activity {
         add(m, desktop ? "✓ เวอร์ชันเดสก์ท็อป" : "เวอร์ชันเดสก์ท็อป", this::toggleDesktop);
         add(m, "เอาสิ่งที่บังจอออก", () -> web.evaluateJavascript(UNCOVER_ALL,
                 n -> toast("0".equals(n) ? "ไม่เจออะไรบังจอ" : "เอาออกแล้ว " + n + " ชิ้น")));
+        add(m, "แปลหน้านี้", this::chooseTranslate);
         add(m, "โหมดมืด", this::chooseDark);
         add(m, "เช็กอัปเดต (build " + installedVersion() + ")", () -> checkUpdate(true));
         add(m, "หน้าแรก", () -> web.loadUrl(HOME));
         p.show();
+    }
+
+    // Google Translate language codes; the most used ones first
+    private static final String[] LANGS = ("th en zh-CN zh-TW ja ko vi id ms lo km my fr de es it pt ru ar hi "
+            + "af sq am hy as ay az bm eu be bn bho bs bg ca ceb ny co hr cs da dv doi nl eo et ee tl fi fy gl ka el "
+            + "gn gu ht ha haw iw hmn hu is ig ilo ga jw kn kk rw gom kri ku ckb ky la lv ln lt lg lb mk mai mg ml mt "
+            + "mi mr mni-Mtei lus mn ne no or om ps fa pl pa qu ro sm sa gd nso sr st sn sd si sk sl so su sw sv tg "
+            + "ta tt te ti ts tr tk ak uk ur ug uz cy xh yi yo zu").split(" ");
+
+    // Whole-page translation through Google's translate proxy (pages come back on *.translate.goog)
+    private void chooseTranslate() {
+        String url = web.getUrl();
+        if (url == null || !isWeb(Uri.parse(url))) return;
+        Locale thai = new Locale("th");
+        String[] names = new String[LANGS.length];
+        for (int i = 0; i < LANGS.length; i++) {
+            String n = Locale.forLanguageTag(LANGS[i]).getDisplayName(thai);
+            names[i] = n.isEmpty() || n.equalsIgnoreCase(LANGS[i]) ? LANGS[i] : n + " (" + LANGS[i] + ")";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("แปลหน้านี้เป็น")
+                .setItems(names, (d, i) -> web.loadUrl("https://translate.google.com/translate?sl=auto&tl="
+                        + LANGS[i] + "&u=" + Uri.encode(url)))
+                .setNegativeButton("ยกเลิก", null)
+                .show();
     }
 
     private void chooseDark() {
