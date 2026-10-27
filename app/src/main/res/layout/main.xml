@@ -103,6 +103,45 @@
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1" />
+
+        <LinearLayout
+            android:id="@+id/groupbar"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
+            <Button
+                android:id="@+id/groupbaropen"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:contentDescription="ดูแท็บในกลุ่ม"
+                android:minWidth="0dp"
+                android:text="⌃"
+                android:textSize="20sp" />
+            <HorizontalScrollView
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:scrollbars="none">
+                <LinearLayout
+                    android:id="@+id/groupstrip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+            <Button
+                android:id="@+id/groupbarnew"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:contentDescription="แท็บใหม่ในกลุ่ม"
+                android:minWidth="0dp"
+                android:text="＋"
+                android:textSize="22sp" />
+        </LinearLayout>
     </LinearLayout>
 
     <LinearLayout
@@ -128,11 +167,12 @@
                 android:textSize="18sp"
                 android:textStyle="bold" />
             <Button
-                android:id="@+id/closeall"
+                android:id="@+id/groupselected"
                 style="?android:attr/borderlessButtonStyle"
                 android:layout_width="wrap_content"
                 android:layout_height="48dp"
-                android:text="ปิดทั้งหมด" />
+                android:text="จัดกลุ่ม"
+                android:visibility="gone" />
             <Button
                 android:id="@+id/newtab"
                 style="?android:attr/borderlessButtonStyle"
@@ -142,19 +182,102 @@
                 android:contentDescription="แท็บใหม่"
                 android:text="＋"
                 android:textSize="24sp" />
+            <Button
+                android:id="@+id/switchermenu"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:minWidth="0dp"
+                android:contentDescription="เมนูแท็บ"
+                android:text="⋮"
+                android:textSize="22sp" />
         </LinearLayout>
-        <GridView
+        <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/tabgrid"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:clipToPadding="false"
-            android:horizontalSpacing="12dp"
-            android:numColumns="2"
-            android:padding="12dp"
-            android:stretchMode="columnWidth"
-            android:verticalSpacing="12dp" />
+            android:padding="6dp" />
     </LinearLayout>
+
+    <FrameLayout
+        android:id="@+id/groupoverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#99000000"
+        android:clickable="true"
+        android:visibility="gone">
+        <LinearLayout
+            android:id="@+id/groupsheet"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_margin="16dp"
+            android:clickable="true"
+            android:orientation="vertical">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="4dp">
+                <View
+                    android:id="@+id/groupdot"
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:layout_margin="12dp"
+                    android:contentDescription="สีของกลุ่ม" />
+                <EditText
+                    android:id="@+id/groupname"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:imeOptions="actionDone"
+                    android:inputType="text"
+                    android:singleLine="true"
+                    android:textSize="18sp" />
+                <Button
+                    android:id="@+id/groupnew"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:contentDescription="แท็บใหม่ในกลุ่ม"
+                    android:minWidth="0dp"
+                    android:text="＋"
+                    android:textSize="22sp" />
+                <Button
+                    android:id="@+id/groupmenu"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:contentDescription="เมนูกลุ่ม"
+                    android:minWidth="0dp"
+                    android:text="⋮"
+                    android:textSize="22sp" />
+            </LinearLayout>
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/groupgrid"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:padding="6dp" />
+                <TextView
+                    android:id="@+id/removezone"
+                    android:layout_width="match_parent"
+                    android:layout_height="72dp"
+                    android:layout_gravity="bottom"
+                    android:background="#E01A73E8"
+                    android:gravity="center"
+                    android:text="ลากมาตรงนี้เพื่อเอาออกจากกลุ่ม"
+                    android:textColor="#FFFFFF"
+                    android:visibility="gone" />
+            </FrameLayout>
+        </LinearLayout>
+    </FrameLayout>
 
     <FrameLayout
         android:id="@+id/fullscreen"

@@ -15,6 +15,7 @@ import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.InsetDrawable;
 import android.net.Uri;
@@ -22,7 +23,10 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Message;
 import android.provider.Settings;
+import android.text.SpannableString;
+import android.text.style.ForegroundColorSpan;
 import android.view.ContextMenu;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.View;
@@ -39,16 +43,19 @@ import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.GridView;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.ItemTouchHelper;
+import androidx.recyclerview.widget.RecyclerView;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -61,6 +68,7 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -73,17 +81,38 @@ public class MainActivity extends Activity {
     private static final String DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
     private static final int REQ_FILE = 1;
 
-    private final List<WebView> tabs = new ArrayList<>();
+    // Chrome tab-group colours: grey, blue, red, yellow, green, pink, purple, cyan, orange
+    private static final int[] GROUP_COLORS = {0xFF5F6368, 0xFF1A73E8, 0xFFD93025, 0xFFF9AB00, 0xFF1E8E3E,
+            0xFFD01884, 0xFF9334E6, 0xFF007B83, 0xFFFA903E};
+    private static final String[] GROUP_COLOR_NAMES = {"เทา", "น้ำเงิน", "แดง", "เหลือง", "เขียว", "ชมพู", "ม่วง", "ฟ้า", "ส้ม"};
+    private static final int BLUE = 0xFF1A73E8;
+
+    static class Group {
+        String name = "";
+        int color;
+        final List<WebView> tabs = new ArrayList<>();
+
+        Group(int color) {
+            this.color = color;
+        }
+    }
+
+    // switcher order: each entry is a lone WebView or a Group of them
+    private final List<Object> entries = new ArrayList<>();
     private WebView web; // current tab
     private FrameLayout frame, fullscreen;
     private EditText bar, findText;
     private TextView findCount;
     private View findBar;
     private Button tabCount;
-    private View switcher;
+    private View switcher, groupSelected, groupOverlay, groupBar, removeZone, groupDot;
     private TextView switcherTitle;
-    private GridView tabGrid;
-    private final TabAdapter tabAdapter = new TabAdapter();
+    private EditText groupName;
+    private RecyclerView tabGrid, groupGrid;
+    private LinearLayout groupStrip;
+    private Group openGroup; // group whose sheet is showing
+    private boolean selecting;
+    private final List<Object> selected = new ArrayList<>();
     private final Map<WebView, Bitmap> thumbs = new HashMap<>();
     private ProgressBar progress;
     private SharedPreferences prefs;
@@ -150,15 +179,7 @@ public class MainActivity extends Activity {
         tabCount.setOnClickListener(v -> showTabs());
         int ink = tabCount.getCurrentTextColor();
         tabCount.setBackground(new InsetDrawable(box(0, ink, 2, 5), Math.round(12 * getResources().getDisplayMetrics().density)));
-        switcher = findViewById(R.id.switcher);
-        switcherTitle = findViewById(R.id.switchertitle);
-        tabGrid = findViewById(R.id.tabgrid);
-        tabGrid.setAdapter(tabAdapter);
-        findViewById(R.id.newtab).setOnClickListener(v -> {
-            newTab(HOME);
-            switcher.setVisibility(View.GONE);
-        });
-        findViewById(R.id.closeall).setOnClickListener(v -> closeAllTabs());
+        setupTabViews();
         findViewById(R.id.menu).setOnClickListener(this::showMenu);
         findText.setOnEditorActionListener((v, id, ev) -> {
             web.findAllAsync(findText.getText().toString());
@@ -169,10 +190,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.findnext).setOnClickListener(v -> web.findNext(true));
         findViewById(R.id.findclose).setOnClickListener(v -> closeFind());
 
-        JSONArray open = load("tabs");
-        for (int i = 0; i < open.length(); i++) newTab(open.optString(i));
-        if (tabs.isEmpty()) newTab(HOME);
-        else select(tabs.get(Math.min(prefs.getInt("tab", 0), tabs.size() - 1)));
+        restoreTabs();
         if (saved == null) handleIntent(getIntent()); // recreate() would reopen the same link
         if (System.currentTimeMillis() - prefs.getLong("lastUpdateCheck", 0) > 6 * 3600_000L) checkUpdate(false);
     }
@@ -277,64 +295,417 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        JSONArray urls = new JSONArray();
-        for (WebView w : tabs) if (w.getUrl() != null) urls.put(w.getUrl());
-        prefs.edit().putString("tabs", urls.toString()).putInt("tab", tabs.indexOf(web)).apply();
+        JSONArray out = new JSONArray();
+        try {
+            for (Object e : entries) {
+                if (!(e instanceof Group)) {
+                    out.put(urlOf((WebView) e));
+                    continue;
+                }
+                Group g = (Group) e;
+                JSONArray urls = new JSONArray();
+                for (WebView w : g.tabs) urls.put(urlOf(w));
+                out.put(new JSONObject().put("n", g.name).put("c", g.color).put("u", urls));
+            }
+        } catch (JSONException ignored) {
+        }
+        prefs.edit().putString("tabs", out.toString()).putInt("tab", allTabs().indexOf(web)).apply();
     }
 
-    // ---- tabs ----
+    // ---- tabs & tab groups ----
+
+    private List<WebView> allTabs() {
+        List<WebView> out = new ArrayList<>();
+        for (Object e : entries) out.addAll(tabsOf(e));
+        return out;
+    }
+
+    private static List<WebView> tabsOf(Object entry) {
+        return entry instanceof Group ? ((Group) entry).tabs : Collections.singletonList((WebView) entry);
+    }
+
+    private Group groupOf(WebView w) {
+        for (Object e : entries) if (e instanceof Group && ((Group) e).tabs.contains(w)) return (Group) e;
+        return null;
+    }
+
+    private static String titleOf(WebView w) {
+        return w.getTitle() == null || w.getTitle().isEmpty() ? String.valueOf(w.getUrl()) : w.getTitle();
+    }
+
+    private static String urlOf(WebView w) {
+        return w.getUrl() == null ? HOME : w.getUrl();
+    }
+
+    private static String groupTitle(Group g) {
+        return g.name.isEmpty() ? g.tabs.size() + " แท็บ" : g.name;
+    }
+
+    // first colour no open group uses yet, like Chrome
+    private int nextColor() {
+        List<Integer> used = new ArrayList<>();
+        for (Object e : entries) if (e instanceof Group) used.add(((Group) e).color);
+        for (int c : GROUP_COLORS) if (!used.contains(c)) return c;
+        return GROUP_COLORS[used.size() % GROUP_COLORS.length];
+    }
+
+    private void restoreTabs() {
+        JSONArray open = load("tabs");
+        for (int i = 0; i < open.length(); i++) {
+            JSONObject o = open.optJSONObject(i);
+            if (o == null) {
+                newTab(open.optString(i), null, false);
+                continue;
+            }
+            Group g = new Group(o.optInt("c", GROUP_COLORS[0]));
+            g.name = o.optString("n");
+            entries.add(g);
+            JSONArray urls = o.optJSONArray("u");
+            for (int j = 0; urls != null && j < urls.length(); j++) newTab(urls.optString(j), g, false);
+            if (g.tabs.isEmpty()) entries.remove(g);
+        }
+        List<WebView> all = allTabs();
+        if (all.isEmpty()) newTab(HOME);
+        else select(all.get(Math.max(0, Math.min(prefs.getInt("tab", 0), all.size() - 1))));
+    }
 
     private WebView newTab(String url) {
+        return newTab(url, null, true);
+    }
+
+    private WebView newTab(String url, Group group, boolean focus) {
         WebView w = createWebView();
-        tabs.add(w);
-        select(w);
+        if (group != null && entries.contains(group)) group.tabs.add(w);
+        else entries.add(w);
+        if (focus) select(w);
+        else updateTabUi();
         w.loadUrl(url);
         return w;
     }
 
     private void select(WebView w) {
-        if (web != null && web != w && tabs.contains(web)) thumbs.put(web, snapshot(web));
+        if (web != null && web != w && allTabs().contains(web)) thumbs.put(web, snapshot(web));
         web = w;
         frame.removeAllViews();
         frame.addView(w);
         bar.clearFocus();
         bar.setText(w.getUrl());
-        tabCount.setText(String.valueOf(tabs.size()));
         progress.setVisibility(View.GONE);
         closeFind();
+        updateTabUi();
     }
 
     private void closeTab(WebView w) {
-        tabs.remove(w);
+        List<WebView> order = allTabs();
+        int at = order.indexOf(w);
+        Group g = groupOf(w);
+        int inGroup = g == null ? -1 : g.tabs.indexOf(w);
+        if (g != null) {
+            g.tabs.remove(w);
+            if (g.tabs.isEmpty()) entries.remove(g);
+        } else entries.remove(w);
         thumbs.remove(w);
+        selected.remove(w);
         frame.removeView(w);
         w.destroy();
-        if (tabs.isEmpty()) newTab(HOME);
-        else if (w == web) select(tabs.get(tabs.size() - 1));
-        else tabCount.setText(String.valueOf(tabs.size()));
-        if (switcher.getVisibility() == View.VISIBLE) showTabs();
+        if (w == web) web = null;
+        if (entries.isEmpty()) newTab(HOME);
+        else if (web == null) {
+            // Chrome stays inside the group when it can
+            if (g != null && !g.tabs.isEmpty()) select(g.tabs.get(Math.min(inGroup, g.tabs.size() - 1)));
+            else {
+                order = allTabs();
+                select(order.get(Math.min(at, order.size() - 1)));
+            }
+        } else updateTabUi();
+    }
+
+    private void closeEntry(Object entry) {
+        selected.remove(entry);
+        for (WebView w : new ArrayList<>(tabsOf(entry))) closeTab(w);
     }
 
     private void closeAllTabs() {
-        for (WebView w : new ArrayList<>(tabs)) {
-            tabs.remove(w);
+        for (WebView w : allTabs()) {
             frame.removeView(w);
             w.destroy();
         }
+        entries.clear();
         thumbs.clear();
+        selected.clear();
         web = null;
         newTab(HOME);
+        hideSwitcher();
+    }
+
+    // Groups the dragged entry with the one it was dropped on.
+    private void mergeEntries(Object dragged, Object target) {
+        if (dragged == target) return;
+        Group g;
+        if (target instanceof Group) g = (Group) target;
+        else if (dragged instanceof Group) {
+            // a group dropped on a lone tab keeps its name and colour and takes the tab in
+            g = (Group) dragged;
+            entries.remove(g);
+            entries.set(entries.indexOf(target), g);
+            g.tabs.add(0, (WebView) target);
+            updateTabUi();
+            return;
+        } else {
+            g = new Group(nextColor());
+            g.tabs.add((WebView) target);
+            entries.set(entries.indexOf(target), g);
+        }
+        g.tabs.addAll(tabsOf(dragged));
+        entries.remove(dragged);
+        updateTabUi();
+    }
+
+    private Group ensureGroup(WebView w) {
+        Group g = groupOf(w);
+        if (g != null) return g;
+        g = new Group(nextColor());
+        g.tabs.add(w);
+        entries.set(entries.indexOf(w), g);
+        updateTabUi();
+        return g;
+    }
+
+    private void removeFromGroup(Group g, WebView w) {
+        int at = entries.indexOf(g);
+        g.tabs.remove(w);
+        entries.add(at + 1, w);
+        if (g.tabs.isEmpty()) entries.remove(g);
+        updateTabUi();
+    }
+
+    private void ungroup(Group g) {
+        int at = entries.indexOf(g);
+        entries.remove(at);
+        entries.addAll(at, g.tabs);
+        if (openGroup == g) closeGroupSheet();
+        updateTabUi();
+    }
+
+    private void groupSelected() {
+        List<WebView> picked = new ArrayList<>();
+        int at = entries.size();
+        for (Object e : new ArrayList<>(entries)) {
+            if (!selected.contains(e)) continue;
+            at = Math.min(at, entries.indexOf(e));
+            picked.addAll(tabsOf(e));
+        }
+        if (picked.size() < 2) {
+            toast("เลือกอย่างน้อย 2 แท็บ");
+            return;
+        }
+        entries.removeAll(selected);
+        Group g = new Group(nextColor());
+        g.tabs.addAll(picked);
+        entries.add(Math.min(at, entries.size()), g);
+        setSelecting(false);
+        toast("จัด " + picked.size() + " แท็บเป็นกลุ่มแล้ว");
+    }
+
+    private void chooseGroupForCurrent() {
+        List<Group> groups = new ArrayList<>();
+        for (Object e : entries) if (e instanceof Group) groups.add((Group) e);
+        CharSequence[] names = new CharSequence[groups.size() + 1];
+        names[0] = "＋ กลุ่มใหม่";
+        for (int i = 0; i < groups.size(); i++) names[i + 1] = dotted(groupTitle(groups.get(i)), groups.get(i).color);
+        new AlertDialog.Builder(this)
+                .setTitle("เพิ่มแท็บลงในกลุ่ม")
+                .setItems(names, (d, i) -> {
+                    WebView w = web;
+                    if (i == 0) ensureGroup(w);
+                    else {
+                        entries.remove(w);
+                        groups.get(i - 1).tabs.add(w);
+                        updateTabUi();
+                    }
+                })
+                .setNegativeButton("ยกเลิก", null)
+                .show();
+    }
+
+    private void chooseColor(Group g) {
+        CharSequence[] names = new CharSequence[GROUP_COLORS.length];
+        for (int i = 0; i < names.length; i++) names[i] = dotted(GROUP_COLOR_NAMES[i], GROUP_COLORS[i]);
+        new AlertDialog.Builder(this)
+                .setTitle("สีของกลุ่ม")
+                .setItems(names, (d, i) -> {
+                    g.color = GROUP_COLORS[i];
+                    updateTabUi();
+                })
+                .show();
+    }
+
+    private static CharSequence dotted(String label, int color) {
+        SpannableString s = new SpannableString("●  " + label);
+        s.setSpan(new ForegroundColorSpan(color), 0, 1, 0);
+        return s;
+    }
+
+    // ---- tab UI: switcher grid, group sheet, bottom group strip ----
+
+    private void setupTabViews() {
+        switcher = findViewById(R.id.switcher);
+        switcherTitle = findViewById(R.id.switchertitle);
+        groupSelected = findViewById(R.id.groupselected);
+        groupOverlay = findViewById(R.id.groupoverlay);
+        groupBar = findViewById(R.id.groupbar);
+        groupStrip = findViewById(R.id.groupstrip);
+        removeZone = findViewById(R.id.removezone);
+        groupDot = findViewById(R.id.groupdot);
+        groupName = findViewById(R.id.groupname);
+        tabGrid = findViewById(R.id.tabgrid);
+        groupGrid = findViewById(R.id.groupgrid);
+
+        tabGrid.setLayoutManager(new GridLayoutManager(this, 2));
+        tabGrid.setAdapter(new CardAdapter(entries, false));
+        new ItemTouchHelper(new DragHelper(false)).attachToRecyclerView(tabGrid);
+        groupGrid.setLayoutManager(new GridLayoutManager(this, 2));
+        new ItemTouchHelper(new DragHelper(true)).attachToRecyclerView(groupGrid);
+
+        findViewById(R.id.newtab).setOnClickListener(v -> {
+            newTab(HOME);
+            hideSwitcher();
+        });
+        groupSelected.setOnClickListener(v -> groupSelected());
+        findViewById(R.id.switchermenu).setOnClickListener(v -> {
+            PopupMenu p = new PopupMenu(this, v);
+            add(p.getMenu(), selecting ? "ยกเลิกการเลือก" : "เลือกแท็บ", () -> setSelecting(!selecting));
+            add(p.getMenu(), "ปิดแท็บทั้งหมด", this::closeAllTabs);
+            p.show();
+        });
+
+        groupOverlay.setOnClickListener(v -> closeGroupSheet());
+        findViewById(R.id.groupsheet).setBackground(box(dark ? 0xFF202124 : 0xFFFFFFFF, 0, 0, 16));
+        groupDot.setOnClickListener(v -> chooseColor(openGroup));
+        groupName.setOnEditorActionListener((v, id, ev) -> {
+            openGroup.name = groupName.getText().toString().trim();
+            hideKeyboard(groupName);
+            updateTabUi();
+            return true;
+        });
+        findViewById(R.id.groupnew).setOnClickListener(v -> {
+            Group g = openGroup;
+            closeGroupSheet();
+            hideSwitcher();
+            newTab(HOME, g, true);
+        });
+        findViewById(R.id.groupmenu).setOnClickListener(v -> {
+            Group g = openGroup;
+            PopupMenu p = new PopupMenu(this, v);
+            add(p.getMenu(), "เปลี่ยนชื่อกลุ่ม", () -> {
+                groupName.requestFocus();
+                ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(groupName, 0);
+            });
+            add(p.getMenu(), "เปลี่ยนสี", () -> chooseColor(g));
+            add(p.getMenu(), "ยกเลิกการจัดกลุ่ม", () -> ungroup(g));
+            add(p.getMenu(), "ปิดกลุ่ม", () -> {
+                closeGroupSheet();
+                closeEntry(g);
+            });
+            p.show();
+        });
+
+        findViewById(R.id.groupbaropen).setOnClickListener(v -> {
+            showTabs();
+            openGroupSheet(groupOf(web));
+        });
+        findViewById(R.id.groupbarnew).setOnClickListener(v -> newTab(HOME, groupOf(web), true));
+    }
+
+    // Chrome-style grid of tab and group cards
+    private void showTabs() {
+        if (web != null) thumbs.put(web, snapshot(web));
+        hideKeyboard(bar);
+        switcher.setVisibility(View.VISIBLE);
+        updateTabUi();
+        Group g = groupOf(web);
+        tabGrid.scrollToPosition(Math.max(0, entries.indexOf(g != null ? g : web)));
+    }
+
+    private void hideSwitcher() {
+        closeGroupSheet();
+        setSelecting(false);
         switcher.setVisibility(View.GONE);
     }
 
-    // Chrome-style grid of tab cards with a screenshot of each page
-    private void showTabs() {
-        thumbs.put(web, snapshot(web));
-        hideKeyboard(bar);
-        switcherTitle.setText("แท็บ " + tabs.size());
-        tabAdapter.notifyDataSetChanged();
-        switcher.setVisibility(View.VISIBLE);
-        tabGrid.setSelection(tabs.indexOf(web));
+    private void setSelecting(boolean on) {
+        selecting = on;
+        selected.clear();
+        updateTabUi();
+    }
+
+    private void openGroupSheet(Group g) {
+        if (g == null) return;
+        openGroup = g;
+        groupName.setText(g.name);
+        groupGrid.setAdapter(new CardAdapter(g.tabs, true));
+        groupOverlay.setVisibility(View.VISIBLE);
+        updateTabUi();
+    }
+
+    private void closeGroupSheet() {
+        if (openGroup != null) openGroup.name = groupName.getText().toString().trim();
+        hideKeyboard(groupName);
+        openGroup = null;
+        groupOverlay.setVisibility(View.GONE);
+        updateTabUi();
+    }
+
+    // Brings every tab view (counter, switcher, group sheet, bottom strip) in line with the model.
+    @SuppressWarnings("NotifyDataSetChanged")
+    private void updateTabUi() {
+        int total = allTabs().size();
+        tabCount.setText(String.valueOf(total));
+        selected.retainAll(entries);
+        switcherTitle.setText(selecting ? "เลือกแล้ว " + selected.size() : "แท็บ " + total);
+        groupSelected.setVisibility(selecting ? View.VISIBLE : View.GONE);
+        if (tabGrid.getAdapter() != null) tabGrid.getAdapter().notifyDataSetChanged();
+        if (openGroup != null && !entries.contains(openGroup)) closeGroupSheet();
+        if (openGroup != null) {
+            groupName.setHint(openGroup.tabs.size() + " แท็บ");
+            groupDot.setBackground(circle(openGroup.color));
+            if (groupGrid.getAdapter() != null) groupGrid.getAdapter().notifyDataSetChanged();
+        }
+        refreshStrip();
+    }
+
+    private void refreshStripFor(WebView view) {
+        Group g = groupOf(view);
+        if (g != null && g == groupOf(web)) refreshStrip();
+    }
+
+    // Chrome's bottom bar: one favicon per tab of the current tab's group
+    private void refreshStrip() {
+        Group g = web == null ? null : groupOf(web);
+        groupBar.setVisibility(g == null ? View.GONE : View.VISIBLE);
+        if (g == null) return;
+        ((TextView) findViewById(R.id.groupbaropen)).setTextColor(g.color);
+        groupStrip.removeAllViews();
+        float d = getResources().getDisplayMetrics().density;
+        for (WebView w : g.tabs) {
+            TextView t = new TextView(this);
+            t.setGravity(Gravity.CENTER);
+            t.setContentDescription(titleOf(w));
+            Bitmap icon = w.getFavicon();
+            if (icon != null) {
+                BitmapDrawable b = new BitmapDrawable(getResources(), icon);
+                b.setBounds(0, 0, Math.round(20 * d), Math.round(20 * d));
+                t.setCompoundDrawables(b, null, null, null);
+            } else {
+                String host = Uri.parse(urlOf(w)).getHost();
+                t.setText(host == null || host.isEmpty() ? "?" : host.replaceFirst("^www\\.", "").substring(0, 1).toUpperCase());
+            }
+            int pad = Math.round(10 * d);
+            t.setPadding(pad, 0, pad, 0);
+            if (w == web) t.setBackground(new InsetDrawable(box(0, g.color, 2, 18), 0, Math.round(6 * d), 0, Math.round(6 * d)));
+            t.setOnClickListener(v -> select(w));
+            groupStrip.addView(t, new LinearLayout.LayoutParams(Math.round(44 * d), ViewGroup.LayoutParams.MATCH_PARENT));
+        }
     }
 
     private static Bitmap snapshot(WebView w) {
@@ -356,29 +727,199 @@ public class MainActivity extends Activity {
         return g;
     }
 
-    private class TabAdapter extends BaseAdapter {
-        @Override public int getCount() { return tabs.size(); }
-        @Override public Object getItem(int i) { return tabs.get(i); }
-        @Override public long getItemId(int i) { return tabs.get(i).hashCode(); }
+    private static GradientDrawable circle(int color) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color);
+        return g;
+    }
+
+    private void bindCard(View v, Object entry, boolean inSheet) {
+        boolean isGroup = entry instanceof Group;
+        List<WebView> ts = tabsOf(entry);
+        boolean current = ts.contains(web);
+        boolean picked = selected.contains(entry);
+        TextView title = v.findViewById(R.id.cardtitle);
+        View dot = v.findViewById(R.id.carddot);
+        ImageView thumb = v.findViewById(R.id.cardthumb);
+        TextView close = v.findViewById(R.id.cardclose);
+        dot.setVisibility(isGroup ? View.VISIBLE : View.GONE);
+        thumb.setVisibility(isGroup ? View.GONE : View.VISIBLE);
+        v.findViewById(R.id.cardmosaic).setVisibility(isGroup ? View.VISIBLE : View.GONE);
+        if (isGroup) {
+            Group g = (Group) entry;
+            title.setText(groupTitle(g));
+            dot.setBackground(circle(g.color));
+            int[] ids = {R.id.m0, R.id.m1, R.id.m2, R.id.m3};
+            int tile = dark ? 0xFF3C4043 : 0xFFF1F3F4;
+            for (int i = 0; i < 4; i++) {
+                ImageView m = v.findViewById(ids[i]);
+                boolean has = i < ts.size() && !(i == 3 && ts.size() > 4);
+                m.setImageBitmap(has ? thumbs.get(ts.get(i)) : null);
+                m.setBackground(i < ts.size() ? box(tile, 0, 0, 8) : null);
+            }
+            // like Chrome: past four tabs the last tile shows how many more there are
+            TextView more = v.findViewById(R.id.cardmore);
+            more.setVisibility(ts.size() > 4 ? View.VISIBLE : View.GONE);
+            more.setText("+" + (ts.size() - 3));
+        } else {
+            WebView w = (WebView) entry;
+            title.setText(titleOf(w));
+            thumb.setImageBitmap(thumbs.get(w));
+            thumb.setContentDescription(titleOf(w));
+        }
+        boolean picking = selecting && !inSheet;
+        close.setText(picking ? (picked ? "☑" : "☐") : "✕");
+        boolean ring = picking ? picked : current;
+        v.setBackground(box(dark ? 0xFF303134 : 0xFFFFFFFF, ring ? BLUE : (dark ? 0xFF5F6368 : 0xFFDADCE0), ring ? 3 : 1, 12));
+        v.setForeground(null);
+        v.setOnClickListener(x -> {
+            if (picking) {
+                if (!selected.remove(entry)) selected.add(entry);
+                updateTabUi();
+            } else if (isGroup) openGroupSheet((Group) entry);
+            else {
+                select((WebView) entry);
+                hideSwitcher();
+            }
+        });
+        close.setOnClickListener(x -> {
+            if (picking) v.performClick();
+            else closeEntry(entry);
+        });
+    }
+
+    private class CardAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+        final List<?> items;
+        final boolean inSheet;
+
+        CardAdapter(List<?> items, boolean inSheet) {
+            this.items = items;
+            this.inSheet = inSheet;
+        }
 
         @Override
-        public View getView(int i, View v, ViewGroup parent) {
-            if (v == null) v = getLayoutInflater().inflate(R.layout.tab_card, parent, false);
-            WebView w = tabs.get(i);
-            boolean current = w == web;
-            String t = w.getTitle() == null || w.getTitle().isEmpty() ? String.valueOf(w.getUrl()) : w.getTitle();
-            ((TextView) v.findViewById(R.id.cardtitle)).setText(t);
-            ImageView img = v.findViewById(R.id.cardthumb);
-            img.setImageBitmap(thumbs.get(w));
-            img.setContentDescription(t);
-            v.setBackground(box(dark ? 0xFF303134 : 0xFFFFFFFF,
-                    current ? 0xFF1A73E8 : (dark ? 0xFF5F6368 : 0xFFDADCE0), current ? 3 : 1, 12));
-            v.setOnClickListener(x -> {
-                select(w);
-                switcher.setVisibility(View.GONE);
-            });
-            v.findViewById(R.id.cardclose).setOnClickListener(x -> closeTab(w));
-            return v;
+        public int getItemCount() {
+            return items.size();
+        }
+
+        @Override
+        public RecyclerView.ViewHolder onCreateViewHolder(ViewGroup parent, int type) {
+            return new RecyclerView.ViewHolder(getLayoutInflater().inflate(R.layout.tab_card, parent, false)) {
+            };
+        }
+
+        @Override
+        public void onBindViewHolder(RecyclerView.ViewHolder h, int pos) {
+            bindCard(h.itemView, items.get(pos), inSheet);
+        }
+    }
+
+    /**
+     * Chrome's tab-grid gestures. Long-press then drag reorders; holding a card over the middle of another
+     * card highlights it and dropping there groups the two. Swiping sideways closes. Inside a group sheet,
+     * dropping on the bottom zone takes the tab out of the group.
+     */
+    private class DragHelper extends ItemTouchHelper.Callback {
+        final boolean inSheet;
+        View hoverView;
+        boolean overZone;
+
+        DragHelper(boolean inSheet) {
+            this.inSheet = inSheet;
+        }
+
+        @Override
+        public int getMovementFlags(RecyclerView rv, RecyclerView.ViewHolder vh) {
+            if (selecting && !inSheet) return 0;
+            return makeMovementFlags(ItemTouchHelper.UP | ItemTouchHelper.DOWN | ItemTouchHelper.LEFT | ItemTouchHelper.RIGHT,
+                    ItemTouchHelper.LEFT | ItemTouchHelper.RIGHT);
+        }
+
+        @Override
+        public float getMoveThreshold(RecyclerView.ViewHolder vh) {
+            return 0.1f; // chooseDropTarget decides between move and merge
+        }
+
+        private boolean inMiddle(View t, float x, float y) {
+            float w = t.getWidth() * 0.25f, h = t.getHeight() * 0.25f;
+            return x > t.getLeft() + w && x < t.getRight() - w && y > t.getTop() + h && y < t.getBottom() - h;
+        }
+
+        @Override
+        public RecyclerView.ViewHolder chooseDropTarget(RecyclerView.ViewHolder dragged, List<RecyclerView.ViewHolder> targets, int curX, int curY) {
+            float cx = curX + dragged.itemView.getWidth() / 2f, cy = curY + dragged.itemView.getHeight() / 2f;
+            for (RecyclerView.ViewHolder t : targets) {
+                View v = t.itemView;
+                boolean inside = cx >= v.getLeft() && cx <= v.getRight() && cy >= v.getTop() && cy <= v.getBottom();
+                // the middle of a card is the "group with it" spot, so only its edges trigger a reorder
+                if (inside && (inSheet || !inMiddle(v, cx, cy))) return t;
+            }
+            return null;
+        }
+
+        @Override
+        public boolean onMove(RecyclerView rv, RecyclerView.ViewHolder vh, RecyclerView.ViewHolder target) {
+            int from = vh.getBindingAdapterPosition(), to = target.getBindingAdapterPosition();
+            if (from < 0 || to < 0) return false;
+            List<?> items = ((CardAdapter) rv.getAdapter()).items;
+            if (from < to) for (int i = from; i < to; i++) Collections.swap(items, i, i + 1);
+            else for (int i = from; i > to; i--) Collections.swap(items, i, i - 1);
+            rv.getAdapter().notifyItemMoved(from, to);
+            return true;
+        }
+
+        @Override
+        public void onSwiped(RecyclerView.ViewHolder vh, int dir) {
+            int pos = vh.getBindingAdapterPosition();
+            List<?> items = ((CardAdapter) (inSheet ? groupGrid : tabGrid).getAdapter()).items;
+            if (pos >= 0 && pos < items.size()) closeEntry(items.get(pos));
+        }
+
+        @Override
+        public void onSelectedChanged(RecyclerView.ViewHolder vh, int state) {
+            super.onSelectedChanged(vh, state);
+            if (state == ItemTouchHelper.ACTION_STATE_DRAG && inSheet) removeZone.setVisibility(View.VISIBLE);
+        }
+
+        @Override
+        public void onChildDraw(Canvas c, RecyclerView rv, RecyclerView.ViewHolder vh, float dX, float dY, int state, boolean active) {
+            super.onChildDraw(c, rv, vh, dX, dY, state, active);
+            if (state != ItemTouchHelper.ACTION_STATE_DRAG || !active) return;
+            View d = vh.itemView;
+            float cx = d.getLeft() + dX + d.getWidth() / 2f, cy = d.getTop() + dY + d.getHeight() / 2f;
+            if (inSheet) {
+                overZone = cy > rv.getHeight() - removeZone.getHeight();
+                removeZone.setAlpha(overZone ? 1f : 0.7f);
+                return;
+            }
+            View hit = null;
+            for (int i = 0; i < rv.getChildCount(); i++) {
+                View t = rv.getChildAt(i);
+                if (t != d && inMiddle(t, cx, cy)) hit = t;
+            }
+            if (hit == hoverView) return;
+            if (hoverView != null) hoverView.setForeground(null);
+            hoverView = hit;
+            if (hit != null) hit.setForeground(box(0, BLUE, 4, 12));
+        }
+
+        @Override
+        public void clearView(RecyclerView rv, RecyclerView.ViewHolder vh) {
+            super.clearView(rv, vh);
+            int from = vh.getBindingAdapterPosition();
+            View hover = hoverView;
+            hoverView = null;
+            if (hover != null) hover.setForeground(null);
+            removeZone.setVisibility(View.GONE);
+            if (from < 0) return;
+            if (inSheet) {
+                if (overZone && openGroup != null && from < openGroup.tabs.size()) removeFromGroup(openGroup, openGroup.tabs.get(from));
+                overZone = false;
+                return;
+            }
+            int to = hover == null ? -1 : rv.getChildAdapterPosition(hover);
+            if (to >= 0 && to != from && to < entries.size() && from < entries.size()) mergeEntries(entries.get(from), entries.get(to));
         }
     }
 
@@ -436,6 +977,7 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 if (view == web && !bar.hasFocus()) bar.setText(url);
                 addHistory(view.getTitle(), url);
+                refreshStripFor(view);
                 String host = Uri.parse(url).getHost();
                 // Google's own search overlays look like full-screen layers; leave its pages alone
                 if (!isGoogle(host)) view.evaluateJavascript(UNCOVER_AUTO, null);
@@ -468,6 +1010,11 @@ public class MainActivity extends Activity {
                 fullscreen.setVisibility(View.VISIBLE);
                 getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+            }
+
+            @Override
+            public void onReceivedIcon(WebView view, Bitmap icon) {
+                refreshStripFor(view);
             }
 
             @Override
@@ -511,8 +1058,8 @@ public class MainActivity extends Activity {
                 probe.post(probe::destroy);
                 Uri u = Uri.parse(url);
                 if (!isWeb(u)) blocked("ลิงก์เปิดแอปอื่น (" + u.getScheme() + ":)");
-                else if (sameSite(from, u.getHost()) || isGoogle(from)) newTab(url);
-                else confirmLeave(url, () -> newTab(url));
+                else if (sameSite(from, u.getHost()) || isGoogle(from)) newTab(url, groupOf(opener), true);
+                else confirmLeave(url, () -> newTab(url, groupOf(opener), true));
             }
 
             @Override
@@ -574,7 +1121,14 @@ public class MainActivity extends Activity {
         boolean image = h.getType() == WebView.HitTestResult.IMAGE_TYPE || h.getType() == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE;
         if (!image && h.getType() != WebView.HitTestResult.SRC_ANCHOR_TYPE) return;
         menu.setHeaderTitle(link);
-        menu.add(image ? "เปิดรูปในแท็บใหม่" : "เปิดในแท็บใหม่").setOnMenuItemClickListener(i -> { newTab(link); return true; });
+        menu.add(image ? "เปิดรูปในแท็บใหม่" : "เปิดในแท็บใหม่").setOnMenuItemClickListener(i -> {
+            newTab(link, groupOf(web), true);
+            return true;
+        });
+        menu.add(image ? "เปิดรูปในแท็บใหม่ในกลุ่ม" : "เปิดในแท็บใหม่ในกลุ่ม").setOnMenuItemClickListener(i -> {
+            newTab(link, ensureGroup(web), false);
+            return true;
+        });
         menu.add(image ? "คัดลอกที่อยู่รูป" : "คัดลอกลิงก์").setOnMenuItemClickListener(i -> { copy(link); return true; });
         if (image) menu.add("ค้นหารูปนี้ด้วย Google Lens").setOnMenuItemClickListener(i -> {
             newTab("https://lens.google.com/uploadbyurl?url=" + Uri.encode(link));
@@ -602,6 +1156,8 @@ public class MainActivity extends Activity {
         add(m, "โหลดใหม่", web::reload);
         add(m, "แท็บใหม่", () -> newTab(HOME));
         add(m, "ปิดแท็บนี้", () -> closeTab(web));
+        if (groupOf(web) == null) add(m, "เพิ่มแท็บลงในกลุ่ม", this::chooseGroupForCurrent);
+        else add(m, "เอาแท็บออกจากกลุ่ม", () -> removeFromGroup(groupOf(web), web));
         add(m, marked ? "★ ลบบุ๊กมาร์ก" : "☆ เพิ่มบุ๊กมาร์ก", this::toggleBookmark);
         add(m, "บุ๊กมาร์ก", this::showBookmarks);
         add(m, "ประวัติ", this::showHistory);
@@ -779,10 +1335,12 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         if (customView != null) exitFullscreen();
-        else if (switcher.getVisibility() == View.VISIBLE) switcher.setVisibility(View.GONE);
+        else if (groupOverlay.getVisibility() == View.VISIBLE) closeGroupSheet();
+        else if (selecting) setSelecting(false);
+        else if (switcher.getVisibility() == View.VISIBLE) hideSwitcher();
         else if (findBar.getVisibility() == View.VISIBLE) closeFind();
         else if (web.canGoBack()) web.goBack();
-        else if (tabs.size() > 1) closeTab(web);
+        else if (allTabs().size() > 1) closeTab(web);
         else super.onBackPressed();
     }
 
