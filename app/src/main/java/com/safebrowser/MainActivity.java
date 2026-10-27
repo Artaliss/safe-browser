@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
             + "document.querySelectorAll('body a,body div,body iframe').forEach(function(e){var s=getComputedStyle(e);"
             + "if(s.position!=='fixed'||(parseInt(s.zIndex)||0)<100)return;var r=e.getBoundingClientRect();"
             + "if(r.width<w*.8||r.height<h*.8)return;"
+            + "if(e.querySelector('input,textarea,[contenteditable]')||e.contains(document.activeElement))return;"
             + "if(e.tagName!=='DIV'||(!(e.innerText||'').trim()&&!e.querySelector('video,img,canvas')))e.remove();});}"
             + "k();var n=0,t=setInterval(function(){k();if(++n>10)clearInterval(t)},1500);})()";
     // Manual version from the menu: drops every big fixed layer and unlocks scrolling.
@@ -435,8 +436,9 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 if (view == web && !bar.hasFocus()) bar.setText(url);
                 addHistory(view.getTitle(), url);
-                view.evaluateJavascript(UNCOVER_AUTO, null);
                 String host = Uri.parse(url).getHost();
+                // Google's own search overlays look like full-screen layers; leave its pages alone
+                if (!isGoogle(host)) view.evaluateJavascript(UNCOVER_AUTO, null);
                 if (host != null && (host.equals("youtube.com") || host.endsWith(".youtube.com"))) view.evaluateJavascript(SKIP_YT_ADS, null);
             }
         });
