@@ -51,3 +51,23 @@ pushground.com
 evadav.com
 clickaine.com
 adspyglass.com
+# Video ad servers (pre-roll / mid-roll, VAST/VPAID)
+imasdk.googleapis.com
+2mdn.net
+fwmrm.net
+spotxchange.com
+spotx.tv
+springserve.com
+teads.tv
+innovid.com
+adsrvr.org
+aniview.com
+vidoomy.com
+sekindo.com
+primis.tech
+tremorhub.com
+lkqd.net
+smartclip.net
+stickyadstv.com
+serving-sys.com
+flashtalking.com

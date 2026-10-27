@@ -97,7 +97,15 @@ public class MainActivity extends Activity {
             + "if(e.tagName!=='DIV'||(!(e.innerText||'').trim()&&!e.querySelector('video,img,canvas')))e.remove();});}"
             + "k();var n=0,t=setInterval(function(){k();if(++n>10)clearInterval(t)},1500);})()";
     // Manual version from the menu: drops every big fixed layer and unlocks scrolling.
-    private static final String UNCOVER_ALL = "(function(){var w=innerWidth,h=innerHeight,c=0;"
+    // YouTube serves its video ads from the same hosts as the videos, so host blocking can't catch them:
+    // jump each ad to its end (muted), press skip / close buttons, and unmute once the real video is back.
+    private static final String SKIP_YT_ADS = "(function(){if(window.__sbAd)return;window.__sbAd=1;var m=0;setInterval(function(){"
+            + "var v=document.querySelector('video'),ad=document.querySelector('.ad-showing,.ad-interrupting');"
+            + "if(ad&&v){if(!v.muted){v.muted=true;m=1;}if(isFinite(v.duration))v.currentTime=v.duration;}"
+            + "else if(m&&v){v.muted=false;m=0;}"
+            + "document.querySelectorAll('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-overlay-close-button')"
+            + ".forEach(function(b){b.click();});},500);})()";
+    private static final String UNCOVER_ALL ="(function(){var w=innerWidth,h=innerHeight,c=0;"
             + "document.querySelectorAll('body *').forEach(function(e){var s=getComputedStyle(e);"
             + "if(s.position!=='fixed'&&s.position!=='sticky')return;var r=e.getBoundingClientRect();"
             + "if(r.width*r.height>w*h*.3){e.remove();c++;}});"
@@ -427,6 +435,8 @@ public class MainActivity extends Activity {
                 if (view == web && !bar.hasFocus()) bar.setText(url);
                 addHistory(view.getTitle(), url);
                 view.evaluateJavascript(UNCOVER_AUTO, null);
+                String host = Uri.parse(url).getHost();
+                if (host != null && (host.equals("youtube.com") || host.endsWith(".youtube.com"))) view.evaluateJavascript(SKIP_YT_ADS, null);
             }
         });
 
