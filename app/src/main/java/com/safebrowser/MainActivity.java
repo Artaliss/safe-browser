@@ -14,7 +14,11 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.InsetDrawable;
@@ -24,11 +28,13 @@ import android.os.Environment;
 import android.os.Message;
 import android.provider.Settings;
 import android.text.SpannableString;
+import android.util.Base64;
 import android.text.style.ForegroundColorSpan;
 import android.view.ContextMenu;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.Menu;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
@@ -63,7 +69,9 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -80,6 +88,7 @@ public class MainActivity extends Activity {
     private static final String HOME = "https://www.google.com/";
     private static final String DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
     private static final int REQ_FILE = 1;
+    private static final int REQ_IMAGE = 2;
 
     // Chrome tab-group colours: grey, blue, red, yellow, green, pink, purple, cyan, orange
     private static final int[] GROUP_COLORS = {0xFF5F6368, 0xFF1A73E8, 0xFFD93025, 0xFFF9AB00, 0xFF1E8E3E,
@@ -142,7 +151,7 @@ public class MainActivity extends Activity {
             + "if(r.width*r.height>w*h*.3){e.remove();c++;}});"
             + "document.body.style.overflow=document.documentElement.style.overflow='auto';return c;})()";
     private ValueCallback<Uri[]> fileCallback;
-    private View customView;
+    private View customView, cropLayer;
     private WebChromeClient.CustomViewCallback customCallback;
 
     @Override
@@ -1131,7 +1140,7 @@ public class MainActivity extends Activity {
         });
         menu.add(image ? "คัดลอกที่อยู่รูป" : "คัดลอกลิงก์").setOnMenuItemClickListener(i -> { copy(link); return true; });
         if (image) menu.add("ค้นหารูปนี้ด้วย Google Lens").setOnMenuItemClickListener(i -> {
-            newTab("https://lens.google.com/uploadbyurl?url=" + Uri.encode(link));
+            lensSearchUrl(link, web.getUrl());
             return true;
         });
         if (image) menu.add("ค้นหารูปนี้ด้วย Yandex").setOnMenuItemClickListener(i -> {
@@ -1142,6 +1151,232 @@ public class MainActivity extends Activity {
             confirmDownload(link, web.getSettings().getUserAgentString(), null, null);
             return true;
         });
+    }
+
+    // ---- search by image (Google Lens) ----
+
+    private void chooseImageSearch() {
+        new AlertDialog.Builder(this)
+                .setTitle("ค้นหาด้วยรูป")
+                .setItems(new String[]{"ครอปจากหน้าเว็บนี้", "อัปโหลดรูปจากเครื่อง"}, (d, i) -> {
+                    if (i == 0) startCrop();
+                    else pickImage();
+                })
+                .show();
+    }
+
+    private void pickImage() {
+        try {
+            startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT).setType("image/*")
+                    .addCategory(Intent.CATEGORY_OPENABLE), REQ_IMAGE);
+        } catch (ActivityNotFoundException e) {
+            toast("ไม่มีแอปให้เลือกรูป");
+        }
+    }
+
+    // Freezes the visible page and lets the user drag a box over the part to search for.
+    private void startCrop() {
+        if (web.getWidth() == 0 || web.getHeight() == 0) return;
+        hideKeyboard(bar);
+        Bitmap shot = Bitmap.createBitmap(web.getWidth(), web.getHeight(), Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(shot);
+        c.translate(-web.getScrollX(), -web.getScrollY());
+        web.draw(c);
+
+        float d = getResources().getDisplayMetrics().density;
+        CropView crop = new CropView(this, shot);
+        LinearLayout layer = new LinearLayout(this);
+        layer.setOrientation(LinearLayout.VERTICAL);
+        layer.setBackgroundColor(0xFF000000);
+        layer.setClickable(true);
+        TextView hint = new TextView(this);
+        hint.setText("ลากกรอบรอบสิ่งที่อยากค้นหา");
+        hint.setTextColor(0xFFFFFFFF);
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(0, Math.round(14 * d), 0, Math.round(14 * d));
+        layer.addView(hint, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        layer.addView(crop, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout buttons = new LinearLayout(this);
+        Button cancel = new Button(this), go = new Button(this);
+        cancel.setText("ยกเลิก");
+        go.setText("ค้นหา");
+        cancel.setOnClickListener(v -> closeCrop());
+        go.setOnClickListener(v -> {
+            Bitmap picked = crop.crop();
+            closeCrop();
+            lensSearch(picked);
+        });
+        buttons.addView(cancel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        buttons.addView(go, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        layer.addView(buttons, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        cropLayer = layer;
+        ((ViewGroup) findViewById(android.R.id.content)).addView(layer,
+                new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private void closeCrop() {
+        if (cropLayer == null) return;
+        ((ViewGroup) cropLayer.getParent()).removeView(cropLayer);
+        cropLayer = null;
+    }
+
+    // Long-pressed image: fetch it ourselves (with the page's cookies) so Lens gets the actual pixels,
+    // which also works for images Lens can't download on its own.
+    private void lensSearchUrl(String imageUrl, String referer) {
+        toast("กำลังส่งรูปไปค้นหา");
+        String ua = web.getSettings().getUserAgentString();
+        String cookie = CookieManager.getInstance().getCookie(imageUrl);
+        Group g = groupOf(web);
+        new Thread(() -> {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(imageUrl).openConnection();
+                c.setRequestProperty("User-Agent", ua);
+                if (cookie != null) c.setRequestProperty("Cookie", cookie);
+                if (referer != null) c.setRequestProperty("Referer", referer);
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(15000);
+                Bitmap b;
+                try (InputStream in = c.getInputStream()) {
+                    b = decodeScaled(readAll(in));
+                }
+                if (b == null) throw new IOException("not an image");
+                runOnUiThread(() -> lensSearch(b));
+            } catch (IOException | RuntimeException e) {
+                runOnUiThread(() -> newTab("https://lens.google.com/uploadbyurl?url=" + Uri.encode(imageUrl), g, true));
+            }
+        }).start();
+    }
+
+    // Uploads the picture to Lens the same way lens.google.com's own upload does: a multipart form with
+    // field encoded_image. Lens answers with a redirect to visual-match results (similar content, any size).
+    private void lensSearch(Bitmap b) {
+        float scale = Math.min(1f, 1600f / Math.max(b.getWidth(), b.getHeight()));
+        if (scale < 1f) b = Bitmap.createScaledBitmap(b, Math.round(b.getWidth() * scale), Math.round(b.getHeight() * scale), true);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        b.compress(Bitmap.CompressFormat.JPEG, 90, out);
+        String b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+        String html = "<!doctype html><meta name=viewport content='width=device-width'><body style='font-family:sans-serif;padding:24px'>"
+                + "กำลังส่งรูปไปค้นหา…<form id=f method=post enctype='multipart/form-data' "
+                + "action='https://lens.google.com/v3/upload?hl=th&st=" + System.currentTimeMillis() + "'>"
+                + "<input type=file name=encoded_image id=i hidden></form><script>"
+                + "var s=atob('" + b64 + "'),a=new Uint8Array(s.length);for(var k=0;k<s.length;k++)a[k]=s.charCodeAt(k);"
+                + "var t=new DataTransfer();t.items.add(new File([a],'image.jpg',{type:'image/jpeg'}));"
+                + "document.getElementById('i').files=t.files;document.getElementById('f').submit();</script>";
+        WebView w = newTab("about:blank", groupOf(web), true);
+        w.loadDataWithBaseURL("https://lens.google.com/", html, "text/html", "utf-8", null);
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+        return out.toByteArray();
+    }
+
+    // decodes at most ~2048px on the long side so huge images don't run out of memory
+    private static Bitmap decodeScaled(byte[] bytes) {
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
+        int sample = 1;
+        while (Math.max(o.outWidth, o.outHeight) / sample > 2048) sample *= 2;
+        BitmapFactory.Options real = new BitmapFactory.Options();
+        real.inSampleSize = sample;
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, real);
+    }
+
+    /** Page screenshot with a movable, resizable selection box (corners resize, inside moves, outside draws anew). */
+    static class CropView extends View {
+        final Bitmap src;
+        final RectF img = new RectF(), sel = new RectF();
+        final Paint shade = new Paint(), edge = new Paint(), knob = new Paint();
+        final float dp;
+        int drag; // 0-3 corner, 4 move, 5 new box
+        float lastX, lastY, startX, startY;
+
+        CropView(Context c, Bitmap src) {
+            super(c);
+            this.src = src;
+            dp = getResources().getDisplayMetrics().density;
+            shade.setColor(0x99000000);
+            edge.setColor(Color.WHITE);
+            edge.setStyle(Paint.Style.STROKE);
+            edge.setStrokeWidth(2 * dp);
+            knob.setColor(Color.WHITE);
+            knob.setAntiAlias(true);
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int ow, int oh) {
+            float s = Math.min((float) w / src.getWidth(), (float) h / src.getHeight());
+            float bw = src.getWidth() * s, bh = src.getHeight() * s;
+            img.set((w - bw) / 2, (h - bh) / 2, (w + bw) / 2, (h + bh) / 2);
+            sel.set(img);
+            sel.inset(img.width() * 0.2f, img.height() * 0.25f);
+        }
+
+        private float[][] corners() {
+            return new float[][]{{sel.left, sel.top}, {sel.right, sel.top}, {sel.left, sel.bottom}, {sel.right, sel.bottom}};
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            c.drawBitmap(src, null, img, null);
+            c.drawRect(img.left, img.top, img.right, sel.top, shade);
+            c.drawRect(img.left, sel.bottom, img.right, img.bottom, shade);
+            c.drawRect(img.left, sel.top, sel.left, sel.bottom, shade);
+            c.drawRect(sel.right, sel.top, img.right, sel.bottom, shade);
+            c.drawRect(sel, edge);
+            for (float[] p : corners()) c.drawCircle(p[0], p[1], 8 * dp, knob);
+        }
+
+        private static float clamp(float v, float lo, float hi) {
+            return Math.max(lo, Math.min(hi, v));
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            float x = clamp(e.getX(), img.left, img.right), y = clamp(e.getY(), img.top, img.bottom);
+            float min = 32 * dp;
+            if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                drag = 5;
+                float[][] cs = corners();
+                for (int i = 0; i < 4; i++) {
+                    if (Math.hypot(cs[i][0] - x, cs[i][1] - y) < 32 * dp) {
+                        drag = i;
+                        break;
+                    }
+                }
+                if (drag == 5 && sel.contains(x, y)) drag = 4;
+                startX = lastX = x;
+                startY = lastY = y;
+            } else if (e.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                if (drag == 4) {
+                    sel.offset(clamp(x - lastX, img.left - sel.left, img.right - sel.right),
+                            clamp(y - lastY, img.top - sel.top, img.bottom - sel.bottom));
+                } else if (drag == 5) {
+                    if (Math.abs(x - startX) > min && Math.abs(y - startY) > min)
+                        sel.set(Math.min(startX, x), Math.min(startY, y), Math.max(startX, x), Math.max(startY, y));
+                } else {
+                    if (drag == 0 || drag == 2) sel.left = Math.min(x, sel.right - min);
+                    else sel.right = Math.max(x, sel.left + min);
+                    if (drag == 0 || drag == 1) sel.top = Math.min(y, sel.bottom - min);
+                    else sel.bottom = Math.max(y, sel.top + min);
+                }
+                lastX = x;
+                lastY = y;
+                invalidate();
+            }
+            return true;
+        }
+
+        Bitmap crop() {
+            float s = src.getWidth() / img.width();
+            int l = Math.max(0, Math.round((sel.left - img.left) * s)), t = Math.max(0, Math.round((sel.top - img.top) * s));
+            int w = Math.max(1, Math.min(src.getWidth() - l, Math.round(sel.width() * s)));
+            int h = Math.max(1, Math.min(src.getHeight() - t, Math.round(sel.height() * s)));
+            return Bitmap.createBitmap(src, l, t, w, h);
+        }
     }
 
     // ---- menu ----
@@ -1167,6 +1402,7 @@ public class MainActivity extends Activity {
         add(m, desktop ? "✓ เวอร์ชันเดสก์ท็อป" : "เวอร์ชันเดสก์ท็อป", this::toggleDesktop);
         add(m, "เอาสิ่งที่บังจอออก", () -> web.evaluateJavascript(UNCOVER_ALL,
                 n -> toast("0".equals(n) ? "ไม่เจออะไรบังจอ" : "เอาออกแล้ว " + n + " ชิ้น")));
+        add(m, "ค้นหาด้วยรูป", this::chooseImageSearch);
         add(m, "แปลหน้านี้", this::chooseTranslate);
         add(m, "โหมดมืด", this::chooseDark);
         add(m, "เช็กอัปเดต (build " + installedVersion() + ")", () -> checkUpdate(true));
@@ -1326,6 +1562,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int req, int result, Intent data) {
         super.onActivityResult(req, result, data);
+        if (req == REQ_IMAGE && result == RESULT_OK && data != null && data.getData() != null) {
+            try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+                Bitmap b = in == null ? null : decodeScaled(readAll(in));
+                if (b == null) toast("เปิดรูปนี้ไม่ได้");
+                else lensSearch(b);
+            } catch (IOException | RuntimeException e) {
+                toast("เปิดรูปนี้ไม่ได้");
+            }
+        }
         if (req == REQ_FILE && fileCallback != null) {
             fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result, data));
             fileCallback = null;
@@ -1334,7 +1579,8 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (customView != null) exitFullscreen();
+        if (cropLayer != null) closeCrop();
+        else if (customView != null) exitFullscreen();
         else if (groupOverlay.getVisibility() == View.VISIBLE) closeGroupSheet();
         else if (selecting) setSelecting(false);
         else if (switcher.getVisibility() == View.VISIBLE) hideSwitcher();
