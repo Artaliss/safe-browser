@@ -88,6 +88,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 public class MainActivity extends Activity {
@@ -133,6 +134,8 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private boolean dark;
     private final Set<String> adHosts = new HashSet<>();
+    // sites the user blocked by hand; read from the WebView network thread too
+    private final Set<String> userBlocked = ConcurrentHashMap.newKeySet();
 
     // Removes full-screen click-hijack layers (transparent links, ad iframes, empty boxes) a few times while the page settles.
     private static final String UNCOVER_AUTO = "(function(){function k(){var w=innerWidth,h=innerHeight;"
@@ -181,6 +184,8 @@ public class MainActivity extends Activity {
             for (String line; (line = r.readLine()) != null; ) if (!line.trim().isEmpty() && !line.startsWith("#")) adHosts.add(line.trim());
         } catch (IOException ignored) {
         }
+        JSONArray mine = load("blocklist");
+        for (int i = 0; i < mine.length(); i++) userBlocked.add(mine.optString(i));
 
         bar.setOnEditorActionListener((v, id, ev) -> {
             if (id == EditorInfo.IME_ACTION_GO || (ev != null && ev.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
@@ -967,6 +972,10 @@ public class MainActivity extends Activity {
                     blocked("ลิงก์เปิดแอปอื่น (" + to.getScheme() + ":)");
                     return true;
                 }
+                if (isUserBlocked(to.getHost())) {
+                    blocked("เว็บที่คุณบล็อกไว้ (" + baseDomain(to.getHost()) + ")");
+                    return true;
+                }
                 String from = Uri.parse(String.valueOf(view.getUrl())).getHost();
                 if (sameSite(from, to.getHost()) || req.isRedirect()) return false;
                 if (!req.hasGesture()) {
@@ -990,7 +999,8 @@ public class MainActivity extends Activity {
 
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
-                if (!isAd(req.getUrl().getHost(), adHosts)) return null;
+                String host = req.getUrl().getHost();
+                if (!isAd(host, adHosts) && !isUserBlocked(host)) return null;
                 return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
             }
 
@@ -1081,6 +1091,7 @@ public class MainActivity extends Activity {
                 probe.post(probe::destroy);
                 Uri u = Uri.parse(url);
                 if (!isWeb(u)) blocked("ลิงก์เปิดแอปอื่น (" + u.getScheme() + ":)");
+                else if (isUserBlocked(u.getHost())) blocked("เว็บที่คุณบล็อกไว้ (" + baseDomain(u.getHost()) + ")");
                 else if (sameSite(from, u.getHost()) || isGoogle(from)) newTab(url, groupOf(opener), true);
                 else confirmLeave(url, () -> newTab(url, groupOf(opener), true));
             }
@@ -1107,6 +1118,7 @@ public class MainActivity extends Activity {
                 .setMessage(Uri.parse(url).getHost() + "\n\nถ้าไม่ได้ตั้งใจกด ให้กดยกเลิก")
                 .setPositiveButton("ไปต่อ", (d, w) -> go.run())
                 .setNegativeButton("ยกเลิก", null)
+                .setNeutralButton("บล็อกเว็บนี้", (d, w) -> blockSite(Uri.parse(url).getHost()))
                 .show();
     }
 
@@ -1153,6 +1165,9 @@ public class MainActivity extends Activity {
             return true;
         });
         menu.add(image ? "คัดลอกที่อยู่รูป" : "คัดลอกลิงก์").setOnMenuItemClickListener(i -> { copy(link); return true; });
+        String linkHost = Uri.parse(link).getHost();
+        if (linkHost != null && !isUserBlocked(linkHost)) menu.add("บล็อกเว็บนี้ (" + baseDomain(linkHost) + ")")
+                .setOnMenuItemClickListener(i -> { blockSite(linkHost); return true; });
         if (image) menu.add("ค้นหาที่มาของรูปนี้").setOnMenuItemClickListener(i -> {
             searchImageUrl(link, web.getUrl());
             return true;
@@ -1501,6 +1516,7 @@ public class MainActivity extends Activity {
         add(m, marked ? "★ ลบบุ๊กมาร์ก" : "☆ เพิ่มบุ๊กมาร์ก", this::toggleBookmark);
         add(m, "บุ๊กมาร์ก", this::showBookmarks);
         add(m, "ประวัติ", this::showHistory);
+        add(m, "เว็บที่บล็อกไว้", this::showBlocked);
         add(m, "ดาวน์โหลด", () -> startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)));
         add(m, "ค้นหาในหน้า", this::openFind);
         add(m, "แชร์", this::share);
@@ -1582,6 +1598,58 @@ public class MainActivity extends Activity {
         findCount.setText("");
         web.clearMatches();
         hideKeyboard(findText);
+    }
+
+    // ---- user blacklist ----
+
+    private boolean isUserBlocked(String host) {
+        return host != null && userBlocked.contains(baseDomain(host));
+    }
+
+    private void blockSite(String host) {
+        if (host == null) return;
+        String site = baseDomain(host);
+        userBlocked.add(site);
+        saveBlocked();
+        toast("บล็อก " + site + " แล้ว จะไม่เปิดหรือเด้งมาอีก");
+    }
+
+    private void saveBlocked() {
+        JSONArray a = new JSONArray();
+        for (String site : userBlocked) a.put(site);
+        save("blocklist", a);
+    }
+
+    private void showBlocked() {
+        String[] sites = userBlocked.toArray(new String[0]);
+        java.util.Arrays.sort(sites);
+        AlertDialog.Builder d = new AlertDialog.Builder(this).setTitle("เว็บที่บล็อกไว้").setNegativeButton("ปิด", null);
+        if (sites.length == 0) d.setMessage("ยังไม่ได้บล็อกเว็บไหน\n\nกด \"บล็อกเว็บนี้\" ตอนเด้งถามว่าจะออกไปเว็บอื่น หรือกดค้างที่ลิงก์");
+        else d.setItems(sites, (dlg, i) -> new AlertDialog.Builder(this)
+                .setTitle("เลิกบล็อก " + sites[i] + "?")
+                .setPositiveButton("เลิกบล็อก", (x, y) -> {
+                    userBlocked.remove(sites[i]);
+                    saveBlocked();
+                })
+                .setNegativeButton("ยกเลิก", null)
+                .show());
+        d.setNeutralButton("เพิ่มเอง", (dlg, i) -> {
+            EditText in = new EditText(this);
+            in.setHint("เช่น badsite.com");
+            in.setInputType(android.text.InputType.TYPE_TEXT_VARIATION_URI);
+            new AlertDialog.Builder(this)
+                    .setTitle("บล็อกเว็บ")
+                    .setView(in)
+                    .setPositiveButton("บล็อก", (x, y) -> {
+                        String t = in.getText().toString().trim();
+                        String h = Uri.parse(t.contains("://") ? t : "https://" + t).getHost();
+                        if (h == null || !h.contains(".")) toast("ชื่อเว็บไม่ถูกต้อง");
+                        else blockSite(h);
+                    })
+                    .setNegativeButton("ยกเลิก", null)
+                    .show();
+        });
+        d.show();
     }
 
     // ---- bookmarks & history (stored as JSON arrays of [title, url]) ----
