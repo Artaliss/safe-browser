@@ -34,7 +34,9 @@ import android.text.SpannableString;
 import android.util.Base64;
 import android.text.style.ForegroundColorSpan;
 import android.view.ContextMenu;
+import android.view.GestureDetector;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MotionEvent;
@@ -1049,8 +1051,9 @@ public class MainActivity extends Activity {
                 customView = v;
                 customCallback = cb;
                 fullscreen.addView(v);
-                fullscreen.addView(fullscreenSearchButton(), new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
+                if (videoSearchMode() == VIDEO_SEARCH_BUTTON)
+                    fullscreen.addView(fullscreenSearchButton(), new FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
                 fullscreen.setVisibility(View.VISIBLE);
                 getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
@@ -1219,6 +1222,41 @@ public class MainActivity extends Activity {
     private void startCrop() {
         hideKeyboard(bar);
         captureScreen(web, this::showCrop);
+    }
+
+    private static final int VIDEO_SEARCH_LONG_PRESS = 0, VIDEO_SEARCH_BUTTON = 1, VIDEO_SEARCH_OFF = 2;
+
+    private int videoSearchMode() {
+        return prefs.getInt("videoSearch", VIDEO_SEARCH_LONG_PRESS);
+    }
+
+    private void chooseVideoSearch() {
+        new AlertDialog.Builder(this)
+                .setTitle("ค้นหาภาพตอนดูวิดีโอเต็มจอ")
+                .setSingleChoiceItems(new String[]{"กดค้างที่จอ", "แสดงปุ่มมุมขวาบน", "ปิด"}, videoSearchMode(), (d, i) -> {
+                    prefs.edit().putInt("videoSearch", i).apply();
+                    d.dismiss();
+                })
+                .show();
+    }
+
+    // Watches touches on fullscreen video without consuming them, so the player's own controls keep working.
+    private GestureDetector videoGestures;
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (customView != null && cropLayer == null && videoSearchMode() == VIDEO_SEARCH_LONG_PRESS) {
+            if (videoGestures == null) videoGestures = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+                @Override
+                public void onLongPress(MotionEvent e) {
+                    if (customView == null) return;
+                    fullscreen.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                    captureScreen(customView, MainActivity.this::showCrop);
+                }
+            });
+            videoGestures.onTouchEvent(ev);
+        }
+        return super.dispatchTouchEvent(ev);
     }
 
     private Button fullscreenSearchButton() {
@@ -1541,6 +1579,7 @@ public class MainActivity extends Activity {
         add(m, "ค้นหาด้วยรูป", this::chooseImageSearch);
         add(m, "แปลหน้านี้", this::chooseTranslate);
         add(m, "โหมดมืด", this::chooseDark);
+        add(m, "ค้นหาภาพตอนดูวิดีโอ", this::chooseVideoSearch);
         add(m, "เช็กอัปเดต (build " + installedVersion() + ")", () -> checkUpdate(true));
         add(m, "หน้าแรก", () -> web.loadUrl(HOME));
         p.show();
