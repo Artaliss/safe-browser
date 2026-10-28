@@ -136,6 +136,8 @@ public class MainActivity extends Activity {
     private final Set<String> adHosts = new HashSet<>();
     // sites the user blocked by hand; read from the WebView network thread too
     private final Set<String> userBlocked = ConcurrentHashMap.newKeySet();
+    // host -> request count for the page each tab is showing, filled from the network thread
+    private final Map<WebView, Map<String, Integer>> requested = new ConcurrentHashMap<>();
 
     // Removes full-screen click-hijack layers (transparent links, ad iframes, empty boxes) a few times while the page settles.
     private static final String UNCOVER_AUTO = "(function(){function k(){var w=innerWidth,h=innerHeight;"
@@ -426,6 +428,7 @@ public class MainActivity extends Activity {
         } else entries.remove(w);
         thumbs.remove(w);
         lensExact.remove(w);
+        requested.remove(w);
         selected.remove(w);
         frame.removeView(w);
         w.destroy();
@@ -995,11 +998,13 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (view == web && !bar.hasFocus()) bar.setText(url);
+                requested.remove(view);
             }
 
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
                 String host = req.getUrl().getHost();
+                if (host != null) requested.computeIfAbsent(view, k -> new ConcurrentHashMap<>()).merge(host.toLowerCase(), 1, Integer::sum);
                 if (!isAd(host, adHosts) && !isUserBlocked(host)) return null;
                 return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
             }
@@ -1523,6 +1528,7 @@ public class MainActivity extends Activity {
         add(m, "บุ๊กมาร์ก", this::showBookmarks);
         add(m, "ประวัติ", this::showHistory);
         add(m, "เว็บที่บล็อกไว้", this::showBlocked);
+        add(m, "เว็บที่หน้านี้โหลด (หาตัวโฆษณา)", this::showRequested);
         add(m, "แตะเลือกโฆษณาที่จะซ่อน", this::startPicker);
         int hidden = hiddenFor(web.getUrl()).length();
         if (hidden > 0) add(m, "โฆษณาที่ซ่อนในเว็บนี้ (" + hidden + ")", this::showHidden);
@@ -1612,7 +1618,7 @@ public class MainActivity extends Activity {
     // ---- user blacklist ----
 
     private boolean isUserBlocked(String host) {
-        return host != null && userBlocked.contains(baseDomain(host));
+        return isAd(host, userBlocked);
     }
 
     private void blockSite(String host) {
@@ -1621,6 +1627,59 @@ public class MainActivity extends Activity {
         userBlocked.add(site);
         saveBlocked();
         toast("บล็อก " + site + " แล้ว จะไม่เปิดหรือเด้งมาอีก");
+    }
+
+    private void blockHost(String host) {
+        userBlocked.add(host.toLowerCase());
+        saveBlocked();
+        toast("บล็อก " + host + " แล้ว");
+    }
+
+    // Every outside server the current page pulled from, busiest first, so ad servers can be spotted and blocked.
+    private void showRequested() {
+        Map<String, Integer> seen = requested.get(web);
+        String site = siteOf(web.getUrl());
+        List<String> hosts = new ArrayList<>();
+        if (seen != null) for (String h : seen.keySet()) if (!baseDomain(h).equals(site)) hosts.add(h);
+        hosts.sort((a, b) -> seen.get(b) - seen.get(a));
+        String[] rows = new String[hosts.size()];
+        for (int i = 0; i < rows.length; i++) {
+            String h = hosts.get(i);
+            String tag = isUserBlocked(h) ? "🚫 " : isAd(h, adHosts) ? "🛡 " : "";
+            rows[i] = tag + h + "  (" + seen.get(h) + ")";
+        }
+        AlertDialog.Builder d = new AlertDialog.Builder(this)
+                .setTitle("เว็บที่หน้านี้โหลด")
+                .setNegativeButton("ปิด", null);
+        if (rows.length == 0) d.setMessage("หน้านี้ไม่ได้โหลดอะไรจากเว็บอื่น");
+        else d.setItems(rows, (dlg, i) -> {
+            String h = hosts.get(i);
+            if (isUserBlocked(h)) {
+                new AlertDialog.Builder(this).setTitle(h)
+                        .setMessage("บล็อกอยู่ เลิกบล็อกได้ที่เมนู \"เว็บที่บล็อกไว้\"")
+                        .setPositiveButton("ตกลง", null).show();
+                return;
+            }
+            if (isAd(h, adHosts)) {
+                toast("ลิสต์ในแอปบล็อกตัวนี้อยู่แล้ว");
+                return;
+            }
+            String base = baseDomain(h);
+            new AlertDialog.Builder(this)
+                    .setTitle("บล็อก " + h + "?")
+                    .setMessage("บล็อกแล้วจะโหลดหน้านี้ใหม่ ถ้าหน้าเว็บพัง ให้เลิกบล็อกที่เมนู \"เว็บที่บล็อกไว้\"")
+                    .setPositiveButton("บล็อกตัวนี้", (x, y) -> {
+                        blockHost(h);
+                        web.reload();
+                    })
+                    .setNeutralButton(h.equals(base) ? null : "บล็อกทั้ง " + base, h.equals(base) ? null : (x, y) -> {
+                        blockHost(base);
+                        web.reload();
+                    })
+                    .setNegativeButton("ยกเลิก", null)
+                    .show();
+        });
+        d.show();
     }
 
     private void saveBlocked() {
