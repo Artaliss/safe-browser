@@ -879,9 +879,12 @@ public class MainActivity extends Activity {
         }
 
         private boolean inMiddle(View t, float x, float y) {
-            float w = t.getWidth() * 0.25f, h = t.getHeight() * 0.25f;
+            float w = t.getWidth() * 0.15f, h = t.getHeight() * 0.15f;
             return x > t.getLeft() + w && x < t.getRight() - w && y > t.getTop() + h && y < t.getBottom() - h;
         }
+
+        View edgeOf;
+        long edgeSince;
 
         @Override
         public RecyclerView.ViewHolder chooseDropTarget(RecyclerView.ViewHolder dragged, List<RecyclerView.ViewHolder> targets, int curX, int curY) {
@@ -889,9 +892,23 @@ public class MainActivity extends Activity {
             for (RecyclerView.ViewHolder t : targets) {
                 View v = t.itemView;
                 boolean inside = cx >= v.getLeft() && cx <= v.getRight() && cy >= v.getTop() && cy <= v.getBottom();
-                // the middle of a card is the "group with it" spot, so only its edges trigger a reorder
-                if (inside && (inSheet || !inMiddle(v, cx, cy))) return t;
+                if (!inside) continue;
+                if (inSheet) return t;
+                // over the middle = "group with it"; never reorder there
+                if (inMiddle(v, cx, cy)) break;
+                // a card's edge only reorders after resting on it, otherwise passing over the edge on the way
+                // to the middle would swap the target away from under the finger
+                long now = android.os.SystemClock.uptimeMillis();
+                if (edgeOf != v) {
+                    edgeOf = v;
+                    edgeSince = now;
+                    return null;
+                }
+                if (now - edgeSince < 400) return null;
+                edgeOf = null;
+                return t;
             }
+            edgeOf = null;
             return null;
         }
 
@@ -936,9 +953,17 @@ public class MainActivity extends Activity {
                 if (t != d && inMiddle(t, cx, cy)) hit = t;
             }
             if (hit == hoverView) return;
-            if (hoverView != null) hoverView.setForeground(null);
+            if (hoverView != null) {
+                hoverView.setForeground(null);
+                hoverView.animate().scaleX(1f).scaleY(1f).setDuration(120);
+            }
             hoverView = hit;
-            if (hit != null) hit.setForeground(box(0, BLUE, 4, 12));
+            d.setAlpha(hit != null ? 0.75f : 1f);
+            if (hit != null) {
+                hit.setForeground(box(0x332196F3, BLUE, 4, 12));
+                hit.animate().scaleX(1.06f).scaleY(1.06f).setDuration(120);
+                hit.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            }
         }
 
         @Override
@@ -947,7 +972,13 @@ public class MainActivity extends Activity {
             int from = vh.getBindingAdapterPosition();
             View hover = hoverView;
             hoverView = null;
-            if (hover != null) hover.setForeground(null);
+            if (hover != null) {
+                hover.setForeground(null);
+                hover.setScaleX(1f);
+                hover.setScaleY(1f);
+            }
+            vh.itemView.setAlpha(1f);
+            edgeOf = null;
             removeZone.setVisibility(View.GONE);
             if (from < 0) return;
             if (inSheet) {
@@ -956,7 +987,10 @@ public class MainActivity extends Activity {
                 return;
             }
             int to = hover == null ? -1 : rv.getChildAdapterPosition(hover);
-            if (to >= 0 && to != from && to < entries.size() && from < entries.size()) mergeEntries(entries.get(from), entries.get(to));
+            if (to >= 0 && to != from && to < entries.size() && from < entries.size()) {
+                mergeEntries(entries.get(from), entries.get(to));
+                toast("รวมเป็นกลุ่มแล้ว แตะการ์ดกลุ่มเพื่อตั้งชื่อ");
+            }
         }
     }
 
