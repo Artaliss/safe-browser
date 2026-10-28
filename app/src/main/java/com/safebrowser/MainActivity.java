@@ -160,7 +160,7 @@ public class MainActivity extends Activity {
             + "if(r.width*r.height>w*h*.3){e.remove();c++;}});"
             + "document.body.style.overflow=document.documentElement.style.overflow='auto';return c;})()";
     private ValueCallback<Uri[]> fileCallback;
-    private View customView, cropLayer;
+    private View customView, cropLayer, pickerBar;
     private WebChromeClient.CustomViewCallback customCallback;
 
     @Override
@@ -1005,7 +1005,13 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageCommitVisible(WebView view, String url) {
+                applyHidden(view, url);
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
+                applyHidden(view, url);
                 if (view == web && !bar.hasFocus()) bar.setText(url);
                 addHistory(view.getTitle(), url);
                 refreshStripFor(view);
@@ -1517,6 +1523,9 @@ public class MainActivity extends Activity {
         add(m, "บุ๊กมาร์ก", this::showBookmarks);
         add(m, "ประวัติ", this::showHistory);
         add(m, "เว็บที่บล็อกไว้", this::showBlocked);
+        add(m, "แตะเลือกโฆษณาที่จะซ่อน", this::startPicker);
+        int hidden = hiddenFor(web.getUrl()).length();
+        if (hidden > 0) add(m, "โฆษณาที่ซ่อนในเว็บนี้ (" + hidden + ")", this::showHidden);
         add(m, "ดาวน์โหลด", () -> startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)));
         add(m, "ค้นหาในหน้า", this::openFind);
         add(m, "แชร์", this::share);
@@ -1652,6 +1661,153 @@ public class MainActivity extends Activity {
         d.show();
     }
 
+    // ---- tap-to-hide element picker (like uBlock's element picker) ----
+
+    // Taps are swallowed while picking so ads can't open anything; the red box shows what will be hidden.
+    private static final String PICKER_JS = "(function(){if(window.__sbP)return;var P=window.__sbP={el:null};"
+            + "var b=document.createElement('div');b.style.cssText='position:fixed;z-index:2147483647;pointer-events:none;"
+            + "border:3px solid #d93025;background:rgba(217,48,37,.25);display:none;box-sizing:border-box';"
+            + "document.documentElement.appendChild(b);"
+            + "P.show=function(){if(!P.el)return;var r=P.el.getBoundingClientRect();b.style.display='block';"
+            + "b.style.left=r.left+'px';b.style.top=r.top+'px';b.style.width=r.width+'px';b.style.height=r.height+'px';};"
+            + "var ev=['click','mousedown','mouseup','pointerup','touchend','auxclick','contextmenu'];"
+            + "P.h=function(e){e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();"
+            + "if(e.type!=='click')return;var el=document.elementFromPoint(e.clientX,e.clientY);if(el&&el!==b){P.el=el;P.show();}};"
+            + "ev.forEach(function(n){window.addEventListener(n,P.h,true);});window.addEventListener('scroll',P.show,true);"
+            + "P.stop=function(){ev.forEach(function(n){window.removeEventListener(n,P.h,true);});"
+            + "window.removeEventListener('scroll',P.show,true);b.remove();delete window.__sbP;};"
+            + "P.grow=function(){var q=P.el&&P.el.parentElement;if(q&&q!==document.body&&q!==document.documentElement){P.el=q;P.show();}};"
+            + "function seg(e){if(e.id&&!/\\d{3,}/.test(e.id))return '#'+CSS.escape(e.id);var s=e.tagName.toLowerCase();"
+            + "var c=[].slice.call(e.classList).filter(function(x){return !/\\d{3,}/.test(x);}).slice(0,3);"
+            + "if(c.length)s+='.'+c.map(function(x){return CSS.escape(x);}).join('.');var p=e.parentElement;"
+            + "if(p){var same=[].filter.call(p.children,function(x){return x.tagName===e.tagName;});"
+            + "if(same.length>1)s+=':nth-of-type('+(same.indexOf(e)+1)+')';}return s;}"
+            + "P.sel=function(){var e=P.el,parts=[];if(!e)return '';while(e&&e!==document.body&&e!==document.documentElement){"
+            + "var s=seg(e);parts.unshift(s);if(s[0]==='#')return parts.join(' > ');e=e.parentElement;}"
+            + "return 'body > '+parts.join(' > ');};})()";
+
+    private void startPicker() {
+        if (pickerBar != null || web.getUrl() == null || !isWeb(Uri.parse(web.getUrl()))) return;
+        WebView target = web;
+        target.evaluateJavascript(PICKER_JS, null);
+        float d = getResources().getDisplayMetrics().density;
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.VERTICAL);
+        bar.setBackgroundColor(0xEE202124);
+        bar.setClickable(true);
+        TextView hint = new TextView(this);
+        hint.setText("แตะโฆษณาที่จะซ่อน ถ้ากรอบเล็กไปให้กด \"ขยายกรอบ\"");
+        hint.setTextColor(0xFFFFFFFF);
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(Math.round(12 * d), Math.round(10 * d), Math.round(12 * d), 0);
+        bar.addView(hint);
+        LinearLayout row = new LinearLayout(this);
+        Button cancel = new Button(this), grow = new Button(this), hide = new Button(this);
+        cancel.setText("ยกเลิก");
+        grow.setText("ขยายกรอบ");
+        hide.setText("ซ่อน");
+        cancel.setOnClickListener(v -> stopPicker());
+        grow.setOnClickListener(v -> target.evaluateJavascript("window.__sbP&&__sbP.grow()", null));
+        hide.setOnClickListener(v -> target.evaluateJavascript("window.__sbP?__sbP.sel():''", json -> {
+            String sel = unquote(json);
+            if (sel.isEmpty()) {
+                toast("แตะโฆษณาบนหน้าเว็บก่อน");
+                return;
+            }
+            addHidden(target.getUrl(), sel);
+            stopPicker();
+            applyHidden(target, target.getUrl());
+            toast("ซ่อนแล้ว เข้าเว็บนี้ครั้งหน้าก็จะไม่เห็นอีก");
+        }));
+        for (Button b : new Button[]{cancel, grow, hide}) row.addView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bar.addView(row);
+        pickerBar = bar;
+        ((ViewGroup) findViewById(android.R.id.content)).addView(bar, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+    }
+
+    private void stopPicker() {
+        if (pickerBar == null) return;
+        ((ViewGroup) pickerBar.getParent()).removeView(pickerBar);
+        pickerBar = null;
+        for (WebView w : allTabs()) w.evaluateJavascript("window.__sbP&&__sbP.stop()", null);
+    }
+
+    // evaluateJavascript hands strings back JSON-quoted
+    private static String unquote(String json) {
+        try {
+            return new JSONArray("[" + json + "]").optString(0, "");
+        } catch (JSONException e) {
+            return "";
+        }
+    }
+
+    private static String siteOf(String url) {
+        String host = url == null ? null : Uri.parse(url).getHost();
+        return host == null ? "" : baseDomain(host);
+    }
+
+    private JSONObject hiddenRules() {
+        try {
+            return new JSONObject(prefs.getString("hidden", "{}"));
+        } catch (JSONException e) {
+            return new JSONObject();
+        }
+    }
+
+    private JSONArray hiddenFor(String url) {
+        JSONArray a = hiddenRules().optJSONArray(siteOf(url));
+        return a == null ? new JSONArray() : a;
+    }
+
+    private void setHiddenFor(String url, JSONArray selectors) {
+        JSONObject all = hiddenRules();
+        try {
+            if (selectors.length() == 0) all.remove(siteOf(url));
+            else all.put(siteOf(url), selectors);
+        } catch (JSONException ignored) {
+        }
+        prefs.edit().putString("hidden", all.toString()).apply();
+    }
+
+    private void addHidden(String url, String selector) {
+        JSONArray a = hiddenFor(url);
+        for (int i = 0; i < a.length(); i++) if (selector.equals(a.optString(i))) return;
+        setHiddenFor(url, a.put(selector));
+    }
+
+    // one <style> per page, rewritten each time so removed rules disappear too
+    private void applyHidden(WebView view, String url) {
+        if (url == null || !isWeb(Uri.parse(url))) return;
+        JSONArray a = hiddenFor(url);
+        StringBuilder css = new StringBuilder();
+        for (int i = 0; i < a.length(); i++) css.append(a.optString(i)).append("{display:none!important}");
+        view.evaluateJavascript("(function(){var s=document.getElementById('__sbHide');if(!s){s=document.createElement('style');"
+                + "s.id='__sbHide';(document.head||document.documentElement).appendChild(s);}s.textContent="
+                + JSONObject.quote(css.toString()) + ";})()", null);
+    }
+
+    private void showHidden() {
+        String url = web.getUrl();
+        JSONArray a = hiddenFor(url);
+        String[] rules = new String[a.length()];
+        for (int i = 0; i < rules.length; i++) rules[i] = a.optString(i);
+        new AlertDialog.Builder(this)
+                .setTitle("โฆษณาที่ซ่อนใน " + siteOf(url))
+                .setItems(rules, (d, i) -> {
+                    a.remove(i);
+                    setHiddenFor(url, a);
+                    applyHidden(web, url);
+                    toast("เลิกซ่อนแล้ว");
+                })
+                .setNeutralButton("เลิกซ่อนทั้งหมด", (d, i) -> {
+                    setHiddenFor(url, new JSONArray());
+                    applyHidden(web, url);
+                })
+                .setNegativeButton("ปิด", null)
+                .show();
+    }
+
     // ---- bookmarks & history (stored as JSON arrays of [title, url]) ----
 
     private void toggleBookmark() {
@@ -1752,7 +1908,8 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (cropLayer != null) closeCrop();
+        if (pickerBar != null) stopPicker();
+        else if (cropLayer != null) closeCrop();
         else if (customView != null) exitFullscreen();
         else if (groupOverlay.getVisibility() == View.VISIBLE) closeGroupSheet();
         else if (selecting) setSelecting(false);
