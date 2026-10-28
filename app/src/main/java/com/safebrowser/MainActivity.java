@@ -67,6 +67,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -119,6 +120,7 @@ public class MainActivity extends Activity {
     private final List<Object> entries = new ArrayList<>();
     private WebView web; // current tab
     private FrameLayout frame, fullscreen;
+    private SwipeRefreshLayout pull;
     private EditText bar, findText;
     private TextView findCount;
     private View findBar;
@@ -177,6 +179,10 @@ public class MainActivity extends Activity {
         super.onCreate(saved);
         setContentView(R.layout.main);
         frame = findViewById(R.id.frame);
+        pull = findViewById(R.id.pull);
+        // shortcut: only knows the page's own scroll, so pages that scroll inside a div can trigger it mid-list; upgrade with a JS scrollTop check if that bites
+        pull.setOnChildScrollUpCallback((p, child) -> web == null || web.getScrollY() > 0);
+        pull.setOnRefreshListener(() -> web.reload());
         fullscreen = findViewById(R.id.fullscreen);
         bar = findViewById(R.id.bar);
         progress = findViewById(R.id.progress);
@@ -415,6 +421,7 @@ public class MainActivity extends Activity {
         bar.clearFocus();
         bar.setText(w.getUrl());
         progress.setVisibility(View.GONE);
+        pull.setRefreshing(false);
         closeFind();
         updateTabUi();
     }
@@ -600,7 +607,11 @@ public class MainActivity extends Activity {
         groupSelected.setOnClickListener(v -> groupSelected());
         findViewById(R.id.switchermenu).setOnClickListener(v -> {
             PopupMenu p = new PopupMenu(this, v);
-            add(p.getMenu(), selecting ? "ยกเลิกการเลือก" : "เลือกแท็บ", () -> setSelecting(!selecting));
+            if (selecting) add(p.getMenu(), "ยกเลิกการเลือก", () -> setSelecting(false));
+            else add(p.getMenu(), "จัดกลุ่มแท็บ", () -> {
+                setSelecting(true);
+                toast("แตะเลือกแท็บที่จะรวมกลุ่ม แล้วกด \"จัดกลุ่ม\" ด้านบน");
+            });
             add(p.getMenu(), "ปิดแท็บทั้งหมด", this::closeAllTabs);
             p.show();
         });
@@ -1044,6 +1055,7 @@ public class MainActivity extends Activity {
                 if (view != web) return;
                 progress.setProgress(p);
                 progress.setVisibility(p < 100 ? View.VISIBLE : View.GONE);
+                if (p == 100) pull.setRefreshing(false);
             }
 
             @Override
@@ -1923,14 +1935,94 @@ public class MainActivity extends Activity {
         showList("บุ๊กมาร์ก", load("bookmarks"), false, null, null);
     }
 
+    // Newest first, split into day sections, one card per visit. Tap opens, long-press removes.
     private void showHistory() {
-        showList("ประวัติ", load("history"), true, "ล้างข้อมูลทั้งหมด", () -> {
-            prefs.edit().remove("history").apply();
-            CookieManager.getInstance().removeAllCookies(null);
-            WebStorage.getInstance().deleteAllData();
-            web.clearCache(true);
-            toast("ล้างประวัติ คุกกี้ และแคชแล้ว");
-        });
+        JSONArray h = load("history");
+        float d = getResources().getDisplayMetrics().density;
+        int pad = Math.round(12 * d);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(pad, 0, pad, pad);
+        AlertDialog[] dlg = new AlertDialog[1];
+        java.text.DateFormat dayFmt = new java.text.SimpleDateFormat("EEEE d MMM yyyy", new Locale("th", "TH"));
+        java.text.DateFormat timeFmt = new java.text.SimpleDateFormat("HH:mm", Locale.getDefault());
+        String lastDay = null;
+        for (int i = h.length() - 1; i >= 0; i--) {
+            JSONArray e = h.optJSONArray(i);
+            String url = e.optString(1);
+            long t = e.optLong(2, 0);
+            String day = t == 0 ? "ก่อนหน้านี้" : dayLabel(t, dayFmt);
+            if (!day.equals(lastDay)) {
+                TextView head = new TextView(this);
+                head.setText(day);
+                head.setTypeface(null, android.graphics.Typeface.BOLD);
+                head.setPadding(Math.round(4 * d), pad, 0, Math.round(6 * d));
+                list.addView(head);
+                lastDay = day;
+            }
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(pad, Math.round(10 * d), pad, Math.round(10 * d));
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(0x22888888);
+            bg.setCornerRadius(12 * d);
+            card.setBackground(bg);
+            TextView name = new TextView(this);
+            name.setText(e.optString(0).isEmpty() ? url : e.optString(0));
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            name.setTextSize(15);
+            TextView sub = new TextView(this);
+            String host = Uri.parse(url).getHost();
+            sub.setText((t == 0 ? "" : timeFmt.format(new java.util.Date(t)) + "  ·  ") + (host == null ? url : host));
+            sub.setSingleLine(true);
+            sub.setTextSize(12);
+            sub.setAlpha(0.6f);
+            card.addView(name);
+            card.addView(sub);
+            int at = i;
+            card.setOnClickListener(v -> {
+                dlg[0].dismiss();
+                web.loadUrl(url);
+            });
+            card.setOnLongClickListener(v -> {
+                JSONArray now = load("history");
+                now.remove(at);
+                save("history", now);
+                dlg[0].dismiss();
+                showHistory();
+                toast("ลบออกจากประวัติแล้ว");
+                return true;
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = Math.round(6 * d);
+            list.addView(card, lp);
+        }
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(list);
+        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle("ประวัติ").setNegativeButton("ปิด", null)
+                .setNeutralButton("ล้างข้อมูลทั้งหมด", (x, y) -> {
+                    prefs.edit().remove("history").apply();
+                    CookieManager.getInstance().removeAllCookies(null);
+                    WebStorage.getInstance().deleteAllData();
+                    web.clearCache(true);
+                    toast("ล้างประวัติ คุกกี้ และแคชแล้ว");
+                });
+        if (h.length() == 0) b.setMessage("ยังไม่มีรายการ");
+        else b.setView(scroll);
+        dlg[0] = b.show();
+    }
+
+    private static String dayLabel(long t, java.text.DateFormat fmt) {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        c.set(java.util.Calendar.HOUR_OF_DAY, 0);
+        c.set(java.util.Calendar.MINUTE, 0);
+        c.set(java.util.Calendar.SECOND, 0);
+        c.set(java.util.Calendar.MILLISECOND, 0);
+        long today = c.getTimeInMillis();
+        if (t >= today) return "วันนี้";
+        if (t >= today - 86_400_000L) return "เมื่อวาน";
+        return fmt.format(new java.util.Date(t));
     }
 
     private void showList(String title, JSONArray items, boolean newestFirst, String extra, Runnable extraAction) {
@@ -1953,7 +2045,7 @@ public class MainActivity extends Activity {
         if (url == null || !isWeb(Uri.parse(url))) return;
         JSONArray h = load("history");
         if (h.length() > 0 && url.equals(h.optJSONArray(h.length() - 1).optString(1))) return;
-        h.put(new JSONArray().put(String.valueOf(title)).put(url));
+        h.put(new JSONArray().put(String.valueOf(title)).put(url).put(System.currentTimeMillis()));
         while (h.length() > 300) h.remove(0);
         save("history", h);
     }
