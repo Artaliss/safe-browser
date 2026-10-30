@@ -1022,20 +1022,12 @@ public class MainActivity extends Activity {
                     blocked("ลิงก์เปิดแอปอื่น (" + to.getScheme() + ":)");
                     return true;
                 }
+                // redirects are only stopped for sites on the user's blacklist
                 if (isUserBlocked(to.getHost())) {
                     blocked("เว็บที่คุณบล็อกไว้ (" + baseDomain(to.getHost()) + ")");
                     return true;
                 }
-                String from = Uri.parse(String.valueOf(view.getUrl())).getHost();
-                if (sameSite(from, to.getHost()) || req.isRedirect()) return false;
-                if (!req.hasGesture()) {
-                    // page script tried to send us elsewhere without a tap
-                    blocked("redirect ไป " + to.getHost());
-                    return true;
-                }
-                if (isGoogle(from)) return false;
-                confirmLeave(to.toString(), () -> view.loadUrl(to.toString()));
-                return true;
+                return false;
             }
 
             @Override
@@ -1077,10 +1069,6 @@ public class MainActivity extends Activity {
         w.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onCreateWindow(WebView view, boolean dialog, boolean gesture, Message msg) {
-                if (!gesture) {
-                    blocked("popup ที่เด้งเอง");
-                    return false;
-                }
                 return openPopup(view, msg);
             }
 
@@ -1139,7 +1127,6 @@ public class MainActivity extends Activity {
 
     // Tapped popups load into a hidden probe WebView first, so we see the target URL before anything shows.
     private boolean openPopup(WebView opener, Message msg) {
-        String from = Uri.parse(String.valueOf(opener.getUrl())).getHost();
         WebView probe = new WebView(this);
         probe.setWebViewClient(new WebViewClient() {
             boolean done;
@@ -1152,8 +1139,7 @@ public class MainActivity extends Activity {
                 Uri u = Uri.parse(url);
                 if (!isWeb(u)) blocked("ลิงก์เปิดแอปอื่น (" + u.getScheme() + ":)");
                 else if (isUserBlocked(u.getHost())) blocked("เว็บที่คุณบล็อกไว้ (" + baseDomain(u.getHost()) + ")");
-                else if (sameSite(from, u.getHost()) || isGoogle(from)) newTab(url, groupOf(opener), true);
-                else confirmLeave(url, () -> newTab(url, groupOf(opener), true));
+                else newTab(url, groupOf(opener), true);
             }
 
             @Override
@@ -1170,16 +1156,6 @@ public class MainActivity extends Activity {
         ((WebView.WebViewTransport) msg.obj).setWebView(probe);
         msg.sendToTarget();
         return true;
-    }
-
-    private void confirmLeave(String url, Runnable go) {
-        new AlertDialog.Builder(this)
-                .setTitle("กำลังจะออกไปเว็บอื่น")
-                .setMessage(Uri.parse(url).getHost() + "\n\nถ้าไม่ได้ตั้งใจกด ให้กดยกเลิก")
-                .setPositiveButton("ไปต่อ", (d, w) -> go.run())
-                .setNegativeButton("ยกเลิก", null)
-                .setNeutralButton("บล็อกเว็บนี้", (d, w) -> blockSite(Uri.parse(url).getHost()))
-                .show();
     }
 
     private void confirmDownload(String url, String ua, String disposition, String mime) {
@@ -1211,35 +1187,59 @@ public class MainActivity extends Activity {
     @Override
     public void onCreateContextMenu(ContextMenu menu, View v, ContextMenu.ContextMenuInfo info) {
         WebView.HitTestResult h = ((WebView) v).getHitTestResult();
-        String link = h.getExtra();
-        if (link == null || !isWeb(Uri.parse(link))) return;
-        boolean image = h.getType() == WebView.HitTestResult.IMAGE_TYPE || h.getType() == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE;
-        if (!image && h.getType() != WebView.HitTestResult.SRC_ANCHOR_TYPE) return;
-        menu.setHeaderTitle(link);
-        menu.add(image ? "เปิดรูปในแท็บใหม่" : "เปิดในแท็บใหม่").setOnMenuItemClickListener(i -> {
-            newTab(link, groupOf(web), true);
-            return true;
-        });
-        menu.add(image ? "เปิดรูปในแท็บใหม่ในกลุ่ม" : "เปิดในแท็บใหม่ในกลุ่ม").setOnMenuItemClickListener(i -> {
-            newTab(link, ensureGroup(web), false);
-            return true;
-        });
-        menu.add(image ? "คัดลอกที่อยู่รูป" : "คัดลอกลิงก์").setOnMenuItemClickListener(i -> { copy(link); return true; });
-        String linkHost = Uri.parse(link).getHost();
-        if (linkHost != null && !isUserBlocked(linkHost)) menu.add("บล็อกเว็บนี้ (" + baseDomain(linkHost) + ")")
-                .setOnMenuItemClickListener(i -> { blockSite(linkHost); return true; });
-        if (image) menu.add("ค้นหาที่มาของรูปนี้").setOnMenuItemClickListener(i -> {
-            searchImageUrl(link, web.getUrl());
-            return true;
-        });
-        if (image) menu.add("ค้นหารูปนี้ด้วย Yandex").setOnMenuItemClickListener(i -> {
-            newTab("https://yandex.com/images/search?rpt=imageview&url=" + Uri.encode(link));
-            return true;
-        });
-        if (image) menu.add("ดาวน์โหลดรูป").setOnMenuItemClickListener(i -> {
-            confirmDownload(link, web.getSettings().getUserAgentString(), null, null);
-            return true;
-        });
+        int type = h.getType();
+        String extra = h.getExtra();
+        if (type == WebView.HitTestResult.SRC_ANCHOR_TYPE) linkActions(extra, null);
+        else if (type == WebView.HitTestResult.IMAGE_TYPE) linkActions(null, extra);
+        else if (type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+            // a picture inside a link (video covers, thumbnails): extra is only the picture, so ask for the link too
+            Message msg = new Handler(Looper.getMainLooper(), m -> {
+                linkActions(m.getData().getString("url"), extra);
+                return true;
+            }).obtainMessage();
+            ((WebView) v).requestFocusNodeHref(msg);
+        }
+    }
+
+    // Long-press actions; link first because a covered link (video thumbnail) is usually what was meant.
+    private void linkActions(String link, String image) {
+        if (link != null && !isWeb(Uri.parse(link))) link = null;
+        if (image != null && !isWeb(Uri.parse(image))) image = null;
+        if (link == null && image == null) return;
+        List<String> names = new ArrayList<>();
+        List<Runnable> acts = new ArrayList<>();
+        String l = link, img = image;
+        if (l != null) {
+            names.add("เปิดในแท็บใหม่ในกลุ่ม");
+            acts.add(() -> newTab(l, ensureGroup(web), false));
+            names.add("เปิดในแท็บใหม่");
+            acts.add(() -> newTab(l, groupOf(web), true));
+            names.add("คัดลอกลิงก์");
+            acts.add(() -> copy(l));
+            String host = Uri.parse(l).getHost();
+            if (host != null && !isUserBlocked(host)) {
+                names.add("บล็อกเว็บนี้ (" + baseDomain(host) + ")");
+                acts.add(() -> blockSite(host));
+            }
+        }
+        if (img != null) {
+            names.add("เปิดรูปในแท็บใหม่");
+            acts.add(() -> newTab(img, groupOf(web), true));
+            names.add("ค้นหาที่มาของรูปนี้");
+            acts.add(() -> searchImageUrl(img, web.getUrl()));
+            names.add("ค้นหารูปนี้ด้วย Yandex");
+            acts.add(() -> newTab("https://yandex.com/images/search?rpt=imageview&url=" + Uri.encode(img)));
+            names.add("ดาวน์โหลดรูป");
+            acts.add(() -> confirmDownload(img, web.getSettings().getUserAgentString(), null, null));
+            if (l == null) {
+                names.add("คัดลอกที่อยู่รูป");
+                acts.add(() -> copy(img));
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(l != null ? l : img)
+                .setItems(names.toArray(new String[0]), (d, i) -> acts.get(i).run())
+                .show();
     }
 
     // ---- search by image: find where a picture or video frame comes from ----
@@ -1602,32 +1602,38 @@ public class MainActivity extends Activity {
         String url = web.getUrl();
         boolean marked = url != null && indexOf(load("bookmarks"), url) >= 0;
         boolean desktop = DESKTOP_UA.equals(web.getSettings().getUserAgentString());
+        // everyday actions on top, the rest folded into three submenus
         if (web.canGoForward()) add(m, "ไปข้างหน้า", web::goForward);
-        add(m, "โหลดใหม่", web::reload);
         add(m, "แท็บใหม่", () -> newTab(HOME));
-        add(m, "ปิดแท็บนี้", () -> closeTab(web));
-        if (groupOf(web) == null) add(m, "เพิ่มแท็บลงในกลุ่ม", this::chooseGroupForCurrent);
-        else add(m, "เอาแท็บออกจากกลุ่ม", () -> removeFromGroup(groupOf(web), web));
         add(m, marked ? "★ ลบบุ๊กมาร์ก" : "☆ เพิ่มบุ๊กมาร์ก", this::toggleBookmark);
         add(m, "บุ๊กมาร์ก", this::showBookmarks);
         add(m, "ประวัติ", this::showHistory);
-        add(m, "เว็บที่บล็อกไว้", this::showBlocked);
-        add(m, "เว็บที่หน้านี้โหลด (หาตัวโฆษณา)", this::showRequested);
-        add(m, "แตะเลือกโฆษณาที่จะซ่อน", this::startPicker);
-        int hidden = hiddenFor(web.getUrl()).length();
-        if (hidden > 0) add(m, "โฆษณาที่ซ่อนในเว็บนี้ (" + hidden + ")", this::showHidden);
         add(m, "ดาวน์โหลด", () -> startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)));
         add(m, "ค้นหาในหน้า", this::openFind);
-        add(m, "แชร์", this::share);
-        add(m, desktop ? "✓ เวอร์ชันเดสก์ท็อป" : "เวอร์ชันเดสก์ท็อป", this::toggleDesktop);
-        add(m, "เอาสิ่งที่บังจอออก", () -> web.evaluateJavascript(UNCOVER_ALL,
-                n -> toast("0".equals(n) ? "ไม่เจออะไรบังจอ" : "เอาออกแล้ว " + n + " ชิ้น")));
-        add(m, "ค้นหาด้วยรูป", this::chooseImageSearch);
         add(m, "แปลหน้านี้", this::chooseTranslate);
-        add(m, "โหมดมืด", this::chooseDark);
-        add(m, "ค้นหาภาพตอนดูวิดีโอ", this::chooseVideoSearch);
-        add(m, "เช็กอัปเดต (build " + installedVersion() + ")", () -> checkUpdate(true));
-        add(m, "หน้าแรก", () -> web.loadUrl(HOME));
+        add(m, "ค้นหาด้วยรูป", this::chooseImageSearch);
+
+        Menu page = m.addSubMenu("หน้านี้ ›");
+        add(page, "แชร์", this::share);
+        add(page, desktop ? "✓ เวอร์ชันเดสก์ท็อป" : "เวอร์ชันเดสก์ท็อป", this::toggleDesktop);
+        if (groupOf(web) == null) add(page, "เพิ่มแท็บลงในกลุ่ม", this::chooseGroupForCurrent);
+        else add(page, "เอาแท็บออกจากกลุ่ม", () -> removeFromGroup(groupOf(web), web));
+        add(page, "ปิดแท็บนี้", () -> closeTab(web));
+        add(page, "หน้าแรก", () -> web.loadUrl(HOME));
+
+        Menu ads = m.addSubMenu("โฆษณา / บล็อก ›");
+        add(ads, "เอาสิ่งที่บังจอออก", () -> web.evaluateJavascript(UNCOVER_ALL,
+                n -> toast("0".equals(n) ? "ไม่เจออะไรบังจอ" : "เอาออกแล้ว " + n + " ชิ้น")));
+        add(ads, "แตะเลือกโฆษณาที่จะซ่อน", this::startPicker);
+        int hidden = hiddenFor(web.getUrl()).length();
+        if (hidden > 0) add(ads, "โฆษณาที่ซ่อนในเว็บนี้ (" + hidden + ")", this::showHidden);
+        add(ads, "เว็บที่หน้านี้โหลด (หาตัวโฆษณา)", this::showRequested);
+        add(ads, "เว็บที่บล็อกไว้", this::showBlocked);
+
+        Menu settings = m.addSubMenu("ตั้งค่า ›");
+        add(settings, "โหมดมืด", this::chooseDark);
+        add(settings, "ค้นหาภาพตอนดูวิดีโอ", this::chooseVideoSearch);
+        add(settings, "เช็กอัปเดต (build " + installedVersion() + ")", () -> checkUpdate(true));
         p.show();
     }
 
@@ -1777,7 +1783,7 @@ public class MainActivity extends Activity {
         String[] sites = userBlocked.toArray(new String[0]);
         java.util.Arrays.sort(sites);
         AlertDialog.Builder d = new AlertDialog.Builder(this).setTitle("เว็บที่บล็อกไว้").setNegativeButton("ปิด", null);
-        if (sites.length == 0) d.setMessage("ยังไม่ได้บล็อกเว็บไหน\n\nกด \"บล็อกเว็บนี้\" ตอนเด้งถามว่าจะออกไปเว็บอื่น หรือกดค้างที่ลิงก์");
+        if (sites.length == 0) d.setMessage("ยังไม่ได้บล็อกเว็บไหน\n\nกดค้างที่ลิงก์แล้วเลือก \"บล็อกเว็บนี้\" หรือกด \"เพิ่มเอง\"");
         else d.setItems(sites, (dlg, i) -> new AlertDialog.Builder(this)
                 .setTitle("เลิกบล็อก " + sites[i] + "?")
                 .setPositiveButton("เลิกบล็อก", (x, y) -> {
