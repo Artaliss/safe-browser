@@ -4,12 +4,10 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
-import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -29,7 +27,6 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
-import android.provider.Settings;
 import android.text.SpannableString;
 import android.util.Base64;
 import android.text.style.ForegroundColorSpan;
@@ -68,6 +65,8 @@ import android.widget.Toast;
 
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+import androidx.webkit.WebSettingsCompat;
+import androidx.webkit.WebViewFeature;
 import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -274,41 +273,20 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    // The app never installs APKs itself (that looks like a dropper to Play Protect); the system installer
+    // opens when the user taps the finished download, and it only accepts an APK signed with this app's key.
     private void downloadUpdate(String apk) {
-        if (!getPackageManager().canRequestPackageInstalls()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("ต้องอนุญาตก่อน")
-                    .setMessage("เปิด \"อนุญาตจากแหล่งนี้\" ให้ Safe Browser แล้วกลับมากดอัปเดตอีกครั้ง")
-                    .setPositiveButton("ไปที่ตั้งค่า", (d, w) -> startActivity(new Intent(
-                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()))))
-                    .setNegativeButton("ยกเลิก", null)
-                    .show();
-            return;
-        }
-        java.io.File old = new java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk");
-        if (old.exists()) old.delete();
-        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-        long id = dm.enqueue(new DownloadManager.Request(Uri.parse(apk))
+        String name = "SafeBrowser-" + apk.replaceAll(".*/download/v?(\d+)/.*", "$1") + ".apk";
+        ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(new DownloadManager.Request(Uri.parse(apk))
                 .setTitle("Safe Browser update")
                 .setMimeType("application/vnd.android.package-archive")
-                .setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "update.apk"));
-        toast("กำลังโหลดอัปเดต");
-        registerReceiver(new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context ctx, Intent i) {
-                if (i.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1) != id) return;
-                unregisterReceiver(this);
-                Uri file = dm.getUriForDownloadedFile(id);
-                if (file == null) {
-                    toast("โหลดอัปเดตไม่สำเร็จ");
-                    return;
-                }
-                // Android itself refuses the install unless the APK is signed with the same key as this app
-                startActivity(new Intent(Intent.ACTION_VIEW)
-                        .setDataAndType(file, "application/vnd.android.package-archive")
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK));
-            }
-        }, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name));
+        new AlertDialog.Builder(this)
+                .setTitle("กำลังโหลดอัปเดต")
+                .setMessage("โหลดเสร็จแล้วจะมีแจ้งเตือน แตะแจ้งเตือนนั้นเพื่อติดตั้ง หรือเปิดไฟล์ " + name + " ในโฟลเดอร์ Download")
+                .setPositiveButton("ตกลง", null)
+                .show();
     }
 
     @Override
@@ -1009,8 +987,9 @@ public class MainActivity extends Activity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         s.setBuiltInZoomControls(true);
         s.setDisplayZoomControls(false);
-        // darkens sites that have no dark style of their own; only honoured while targetSdk <= 32
-        if (dark) s.setForceDark(WebSettings.FORCE_DARK_ON);
+        // darkens sites that have no dark style of their own; needs the Dark (non-light) theme on targetSdk 33+
+        if (dark && WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING))
+            WebSettingsCompat.setAlgorithmicDarkening(s, true);
 
         w.setWebViewClient(new WebViewClient() {
             @Override

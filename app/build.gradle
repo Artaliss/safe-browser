@@ -6,7 +6,7 @@ android {
     defaultConfig {
         applicationId 'com.safebrowser'
         minSdk 29
-        targetSdk 32 // 33+ turns setForceDark into a no-op
+        targetSdk 34
         versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1') as Integer) // must match the release tag number
         versionName "build ${System.getenv('GITHUB_RUN_NUMBER') ?: 'dev'}"
     }
@@ -26,11 +26,12 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
     testOptions { unitTests.returnDefaultValues = true }
-    lint { checkReleaseBuilds false } // lintVital fails release on the old targetSdk
+    lint { checkReleaseBuilds false }
 }
 
 dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    implementation 'androidx.webkit:webkit:1.8.0'
     testImplementation 'junit:junit:4.13.2'
 }
