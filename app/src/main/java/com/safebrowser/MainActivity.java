@@ -1024,7 +1024,7 @@ public class MainActivity extends Activity {
         s.setDisplayZoomControls(false);
         // darkens sites that have no dark style of their own; needs the Dark (non-light) theme on targetSdk 33+
         if (dark && WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING))
-            WebSettingsCompat.setAlgorithmicDarkening(s, true);
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, true);
 
         w.setWebViewClient(new WebViewClient() {
             @Override
