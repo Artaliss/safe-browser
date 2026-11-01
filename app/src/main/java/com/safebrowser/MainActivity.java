@@ -159,6 +159,41 @@ public class MainActivity extends Activity {
             + "else if(m&&v){v.muted=false;m=0;}"
             + "document.querySelectorAll('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-overlay-close-button')"
             + ".forEach(function(b){b.click();});},500);})()";
+    // Blocking a host only empties the ad; its box (often with a close button) stays. Every 0.7 s this hides
+    // anything still pointing at a blocked host together with its wrapper, fast-forwards ads in other sites'
+    // video players (JW, Video.js, VAST...) and presses their "skip ad" buttons. H = blocked host suffixes.
+    private static final String AD_CLEAN = "(function(H){if(window.__sbClean)return;window.__sbClean=1;"
+            + "function bad(u){if(!u)return false;var h;try{h=new URL(u,location.href).hostname;}catch(x){return false;}"
+            + "for(var i=0;i<H.length;i++)if(h===H[i]||h.endsWith('.'+H[i]))return true;return false;}"
+            + "function area(e){var r=e.getBoundingClientRect();return r.width*r.height;}"
+            + "function hide(e){var t=e,a=Math.max(area(e),1),p;"
+            + "while((p=t.parentElement)&&p!==document.body&&!p.querySelector('video')&&area(p)<=Math.max(a*1.6,a+20000))t=p;"
+            + "for(p=t;p&&p!==document.body;p=p.parentElement){var s=getComputedStyle(p).position;"
+            + "if(s==='fixed'||s==='sticky'){if(area(p)<innerWidth*innerHeight*.4)t=p;break;}}"
+            + "t.style.setProperty('display','none','important');}"
+            + "var AD=/(^|[-_])(ad-?showing|ad-?playing|ad-?interrupting|flag-ads|preroll|pre-roll|vast|ima|videoad|video-ad)([-_]|$)/i;"
+            + "function inAd(v){for(var p=v,n=0;p&&n<6;n++,p=p.parentElement){"
+            + "var t=((typeof p.className==='string'?p.className:'')+' '+(p.id||'')).split(/\\s+/);"
+            + "for(var i=0;i<t.length;i++)if(t[i]&&AD.test(t[i]))return true;}return false;}"
+            + "var SKIP=/^(skip|skip ads?|ข้าม|ข้ามโฆษณา|close ad|ปิดโฆษณา)\\s*[›>»▶⏭]*$/i;"
+            + "function sweep(){"
+            + "document.querySelectorAll('iframe,img,embed,object,a[href]').forEach(function(e){var u=e.src||e.data||e.href;"
+            + "if(!u||e.__sb===u)return;e.__sb=u;if(bad(u))hide(e);});"
+            + "var vs=document.querySelectorAll('video');if(!vs.length)return;"
+            // content videos run long; only short clips under an ad-flagged player get skipped
+            + "vs.forEach(function(v){var d=v.duration,ad=bad(v.currentSrc)||(inAd(v)&&!(d>180));"
+            + "if(ad){if(!v.__sbm){v.__sbm=1;v.muted=true;}try{v.playbackRate=16;}catch(x){}"
+            + "if(isFinite(d)&&d>0&&v.currentTime<d-.5)v.currentTime=d-.1;}"
+            + "else if(v.__sbm){v.__sbm=0;v.muted=false;v.playbackRate=1;}});"
+            + "document.querySelectorAll('[class*=skip i],[id*=skip i],button,[role=button]').forEach(function(b){"
+            + "if(b.offsetParent===null||b.disabled)return;var t=(b.innerText||'').trim(),c=(typeof b.className==='string'?b.className:'')+' '+b.id;"
+            + "if(t.length<25&&(SKIP.test(t)||(/skip/i.test(c)&&/(^|[-_ ])ads?([-_ ]|$)|adskip|skipad/i.test(c))))b.click();});}"
+            + "sweep();setInterval(sweep,700);})";
+    // Common ad slots, hidden on every site (each its own rule so one selector the engine rejects can't void the rest)
+    private static final String[] GENERIC_HIDE = {"ins.adsbygoogle", ".adsbygoogle", "[id^=div-gpt-ad]", "[id^=google_ads_iframe]",
+            "[data-ad-slot]", "[data-ad-unit]", "[data-google-query-id]", "amp-ad", "amp-embed", "[id^=taboola]", ".OUTBRAIN",
+            ".ad-banner", ".banner-ad", ".ads-banner", ".adsbox", ".ad-container", ".ad_container", "[id^=ad-slot]",
+            "[class^=ad-slot]", "[aria-label=Advertisement]", "[aria-label=โฆษณา]"};
     private static final String UNCOVER_ALL ="(function(){var w=innerWidth,h=innerHeight,c=0;"
             + "document.querySelectorAll('body *').forEach(function(e){var s=getComputedStyle(e);"
             + "if(s.position!=='fixed'&&s.position!=='sticky')return;var r=e.getBoundingClientRect();"
@@ -276,7 +311,7 @@ public class MainActivity extends Activity {
     // The app never installs APKs itself (that looks like a dropper to Play Protect); the system installer
     // opens when the user taps the finished download, and it only accepts an APK signed with this app's key.
     private void downloadUpdate(String apk) {
-        String name = "SafeBrowser-" + apk.replaceAll(".*/download/v?(\d+)/.*", "$1") + ".apk";
+        String name = "SafeBrowser-" + apk.replaceAll(".*/download/v?(\\d+)/.*", "$1") + ".apk";
         ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(new DownloadManager.Request(Uri.parse(apk))
                 .setTitle("Safe Browser update")
                 .setMimeType("application/vnd.android.package-archive")
@@ -1910,7 +1945,11 @@ public class MainActivity extends Activity {
         if (url == null || !isWeb(Uri.parse(url))) return;
         JSONArray a = hiddenFor(url);
         StringBuilder css = new StringBuilder();
+        for (String sel : GENERIC_HIDE) css.append(sel).append("{display:none!important}");
         for (int i = 0; i < a.length(); i++) css.append(a.optString(i)).append("{display:none!important}");
+        JSONArray hosts = new JSONArray(adHosts);
+        for (String h : userBlocked) hosts.put(h);
+        view.evaluateJavascript(AD_CLEAN + "(" + hosts + ")", null);
         view.evaluateJavascript("(function(){var s=document.getElementById('__sbHide');if(!s){s=document.createElement('style');"
                 + "s.id='__sbHide';(document.head||document.documentElement).appendChild(s);}s.textContent="
                 + JSONObject.quote(css.toString()) + ";})()", null);
