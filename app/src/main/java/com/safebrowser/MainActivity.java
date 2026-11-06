@@ -205,6 +205,7 @@ public class MainActivity extends Activity {
             + "document.body.style.overflow=document.documentElement.style.overflow='auto';return c;})()";
     private ValueCallback<Uri[]> fileCallback;
     private View customView, cropLayer, pickerBar;
+    private final Map<WebView, WebView> openedFrom = new HashMap<>(); // tab opened by a link -> the tab with that link
     private float touchX, touchY; // last finger-down point on the page, in CSS pixels, for long-press hiding
     private WebChromeClient.CustomViewCallback customCallback;
 
@@ -456,6 +457,7 @@ public class MainActivity extends Activity {
         thumbs.remove(w);
         lensExact.remove(w);
         requested.remove(w);
+        openedFrom.remove(w);
         selected.remove(w);
         frame.removeView(w);
         w.destroy();
@@ -1170,7 +1172,7 @@ public class MainActivity extends Activity {
                 Uri u = Uri.parse(url);
                 if (!isWeb(u)) blocked("ลิงก์เปิดแอปอื่น (" + u.getScheme() + ":)");
                 else if (isUserBlocked(u.getHost())) blocked("เว็บที่คุณบล็อกไว้ (" + baseDomain(u.getHost()) + ")");
-                else newTab(url, groupOf(opener), true);
+                else openedFrom.put(newTab(url, groupOf(opener), true), opener);
             }
 
             @Override
@@ -1254,7 +1256,10 @@ public class MainActivity extends Activity {
             names.add("เปิดในแท็บใหม่ในกลุ่ม");
             acts.add(() -> newTab(l, ensureGroup(web), false));
             names.add("เปิดในแท็บใหม่");
-            acts.add(() -> newTab(l, groupOf(web), true));
+            acts.add(() -> {
+                WebView from = web;
+                openedFrom.put(newTab(l, groupOf(from), true), from);
+            });
             names.add("คัดลอกลิงก์");
             acts.add(() -> copy(l));
             String host = Uri.parse(l).getHost();
@@ -2207,8 +2212,8 @@ public class MainActivity extends Activity {
         else if (switcher.getVisibility() == View.VISIBLE) hideSwitcher();
         else if (findBar.getVisibility() == View.VISIBLE) closeFind();
         else if (web.canGoBack()) web.goBack();
-        else if (allTabs().size() > 1) closeTab(web);
-        else super.onBackPressed();
+        else if (allTabs().contains(openedFrom.get(web))) select(openedFrom.get(web)); // back to the tab whose link opened this one
+        else moveTaskToBack(true); // leave the app, tabs stay open
     }
 
     private void copy(String text) {
