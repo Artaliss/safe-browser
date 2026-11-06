@@ -201,6 +201,7 @@ public class MainActivity extends Activity {
             + "document.body.style.overflow=document.documentElement.style.overflow='auto';return c;})()";
     private ValueCallback<Uri[]> fileCallback;
     private View customView, cropLayer, pickerBar;
+    private float touchX, touchY; // last finger-down point on the page, in CSS pixels, for long-press hiding
     private WebChromeClient.CustomViewCallback customCallback;
 
     @Override
@@ -1136,6 +1137,14 @@ public class MainActivity extends Activity {
             if (done && w == web) findCount.setText(count == 0 ? "0/0" : (i + 1) + "/" + count);
         });
         registerForContextMenu(w);
+        w.setOnTouchListener((v, e) -> {
+            if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                // getScale() is view pixels per CSS pixel (density times zoom)
+                touchX = e.getX() / w.getScale();
+                touchY = e.getY() / w.getScale();
+            }
+            return false;
+        });
         return w;
     }
 
@@ -1212,6 +1221,15 @@ public class MainActivity extends Activity {
                 return true;
             }).obtainMessage();
             ((WebView) v).requestFocusNodeHref(msg);
+        } else if (type == WebView.HitTestResult.UNKNOWN_TYPE) {
+            // ads in iframes or plain boxes give no link or image; offer to hide them unless it's ordinary text
+            String x = String.valueOf(touchX), y = String.valueOf(touchY);
+            ((WebView) v).evaluateJavascript("(function(){var e=document.elementFromPoint(" + x + "," + y + ");"
+                    + "if(!e)return false;if(/^(IFRAME|INS|VIDEO|IMG|CANVAS)$/.test(e.tagName))return true;"
+                    + "return ![].some.call(e.childNodes,function(n){return n.nodeType===3&&n.textContent.trim();});})()",
+                    r -> {
+                        if ("true".equals(r)) startPickerAt(touchX, touchY);
+                    });
         }
     }
 
@@ -1223,6 +1241,7 @@ public class MainActivity extends Activity {
         List<String> names = new ArrayList<>();
         List<Runnable> acts = new ArrayList<>();
         String l = link, img = image;
+        float x = touchX, y = touchY;
         if (l != null) {
             names.add("เปิดในแท็บใหม่ในกลุ่ม");
             acts.add(() -> newTab(l, ensureGroup(web), false));
@@ -1233,9 +1252,14 @@ public class MainActivity extends Activity {
             String host = Uri.parse(l).getHost();
             if (host != null && !isUserBlocked(host)) {
                 names.add("บล็อกเว็บนี้ (" + baseDomain(host) + ")");
-                acts.add(() -> blockSite(host));
+                acts.add(() -> {
+                    blockSite(host);
+                    applyHidden(web, web.getUrl()); // hide this site's boxes already on the page
+                });
             }
         }
+        names.add("ซ่อนโฆษณาตรงนี้");
+        acts.add(() -> startPickerAt(x, y));
         if (img != null) {
             names.add("เปิดรูปในแท็บใหม่");
             acts.add(() -> newTab(img, groupOf(web), true));
@@ -1840,6 +1864,7 @@ public class MainActivity extends Activity {
             + "ev.forEach(function(n){window.addEventListener(n,P.h,true);});window.addEventListener('scroll',P.show,true);"
             + "P.stop=function(){ev.forEach(function(n){window.removeEventListener(n,P.h,true);});"
             + "window.removeEventListener('scroll',P.show,true);b.remove();delete window.__sbP;};"
+            + "P.pick=function(x,y){var el=document.elementFromPoint(x,y);if(el&&el!==b){P.el=el;P.show();}};"
             + "P.grow=function(){var q=P.el&&P.el.parentElement;if(q&&q!==document.body&&q!==document.documentElement){P.el=q;P.show();}};"
             + "function seg(e){if(e.id&&!/\\d{3,}/.test(e.id))return '#'+CSS.escape(e.id);var s=e.tagName.toLowerCase();"
             + "var c=[].slice.call(e.classList).filter(function(x){return !/\\d{3,}/.test(x);}).slice(0,3);"
@@ -1888,6 +1913,12 @@ public class MainActivity extends Activity {
         pickerBar = bar;
         ((ViewGroup) findViewById(android.R.id.content)).addView(bar, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+    }
+
+    // long-press entry: open the picker with the pressed element already boxed
+    private void startPickerAt(float x, float y) {
+        startPicker();
+        web.evaluateJavascript("window.__sbP&&__sbP.pick(" + x + "," + y + ")", null);
     }
 
     private void stopPicker() {
