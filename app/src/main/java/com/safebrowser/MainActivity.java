@@ -66,6 +66,7 @@ import android.widget.Toast;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import androidx.webkit.WebSettingsCompat;
+import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.RecyclerView;
@@ -171,11 +172,12 @@ public class MainActivity extends Activity {
             + "for(p=t;p&&p!==document.body;p=p.parentElement){var s=getComputedStyle(p).position;"
             + "if(s==='fixed'||s==='sticky'){if(area(p)<innerWidth*innerHeight*.4)t=p;break;}}"
             + "t.style.setProperty('display','none','important');}"
-            + "var AD=/(^|[-_])(ad-?showing|ad-?playing|ad-?interrupting|flag-ads|preroll|pre-roll|vast|ima|videoad|video-ad)([-_]|$)/i;"
+            + "var AD=/(^|[-_])(ad-?showing|ad-?playing|ad-?interrupting|flag-ads|ad-?mode|ads?-?active|linear-?ad|preroll|pre-roll|vast|ima|videoad|video-ad)([-_]|$)/i;"
             + "function inAd(v){for(var p=v,n=0;p&&n<6;n++,p=p.parentElement){"
             + "var t=((typeof p.className==='string'?p.className:'')+' '+(p.id||'')).split(/\\s+/);"
             + "for(var i=0;i<t.length;i++)if(t[i]&&AD.test(t[i]))return true;}return false;}"
-            + "var SKIP=/^(skip|skip ads?|ข้าม|ข้ามโฆษณา|close ad|ปิดโฆษณา)\\s*[›>»▶⏭]*$/i;"
+            // no digits allowed, so countdowns like "ข้ามได้ใน 3" wait until the real button shows
+            + "var SKIP=/^(กด\\s*)?(skip|skip ads?|skip video|ข้าม|ข้ามโฆษณา|close ad|ปิดโฆษณา)\\s*[›>»▶⏭\\s]*$/i;"
             + "function sweep(){"
             + "document.querySelectorAll('iframe,img,embed,object,a[href]').forEach(function(e){var u=e.src||e.data||e.href;"
             + "if(!u||e.__sb===u)return;e.__sb=u;if(bad(u))hide(e);});"
@@ -185,7 +187,9 @@ public class MainActivity extends Activity {
             + "if(ad){if(!v.__sbm){v.__sbm=1;v.muted=true;}try{v.playbackRate=16;}catch(x){}"
             + "if(isFinite(d)&&d>0&&v.currentTime<d-.5)v.currentTime=d-.1;}"
             + "else if(v.__sbm){v.__sbm=0;v.muted=false;v.playbackRate=1;}});"
-            + "document.querySelectorAll('[class*=skip i],[id*=skip i],button,[role=button]').forEach(function(b){"
+            // homemade players draw "skip" as a plain div or span, so those are read too
+            + "document.querySelectorAll('[class*=skip i],[id*=skip i],button,[role=button],a,div,span').forEach(function(b){"
+            + "if(b.childElementCount>2)return;"
             + "if(b.offsetParent===null||b.disabled)return;var t=(b.innerText||'').trim(),c=(typeof b.className==='string'?b.className:'')+' '+b.id;"
             + "if(t.length<25&&(SKIP.test(t)||(/skip/i.test(c)&&/(^|[-_ ])ads?([-_ ]|$)|adskip|skipad/i.test(c))))b.click();});}"
             + "sweep();setInterval(sweep,700);})";
@@ -1012,6 +1016,10 @@ public class MainActivity extends Activity {
 
     private WebView createWebView() {
         WebView w = new WebView(this);
+        // video players usually sit in another site's iframe, which evaluateJavascript never reaches
+        // shortcut: hosts blocked later only reach iframes in tabs opened after that, fine until it matters
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT))
+            WebViewCompat.addDocumentStartJavaScript(w, adClean(), Collections.singleton("*"));
         WebSettings s = w.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -1971,6 +1979,12 @@ public class MainActivity extends Activity {
         setHiddenFor(url, a.put(selector));
     }
 
+    private String adClean() {
+        JSONArray hosts = new JSONArray(adHosts);
+        for (String h : userBlocked) hosts.put(h);
+        return AD_CLEAN + "(" + hosts + ")";
+    }
+
     // one <style> per page, rewritten each time so removed rules disappear too
     private void applyHidden(WebView view, String url) {
         if (url == null || !isWeb(Uri.parse(url))) return;
@@ -1978,9 +1992,7 @@ public class MainActivity extends Activity {
         StringBuilder css = new StringBuilder();
         for (String sel : GENERIC_HIDE) css.append(sel).append("{display:none!important}");
         for (int i = 0; i < a.length(); i++) css.append(a.optString(i)).append("{display:none!important}");
-        JSONArray hosts = new JSONArray(adHosts);
-        for (String h : userBlocked) hosts.put(h);
-        view.evaluateJavascript(AD_CLEAN + "(" + hosts + ")", null);
+        view.evaluateJavascript(adClean(), null);
         view.evaluateJavascript("(function(){var s=document.getElementById('__sbHide');if(!s){s=document.createElement('style');"
                 + "s.id='__sbHide';(document.head||document.documentElement).appendChild(s);}s.textContent="
                 + JSONObject.quote(css.toString()) + ";})()", null);
