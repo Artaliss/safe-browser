@@ -207,6 +207,9 @@ public class MainActivity extends Activity {
     private View customView, cropLayer, pickerBar;
     private final Map<WebView, WebView> openedFrom = new HashMap<>(); // tab opened by a link -> the tab with that link
     private float touchX, touchY; // last finger-down point on the page, in CSS pixels, for long-press hiding
+    private boolean pullOk; // this touch started at the top of the page and of any scrolling box under the finger
+    private int touchSeq;
+    private AlertDialog redirectAsk;
     private WebChromeClient.CustomViewCallback customCallback;
 
     @Override
@@ -220,8 +223,8 @@ public class MainActivity extends Activity {
         setContentView(R.layout.main);
         frame = findViewById(R.id.frame);
         pull = findViewById(R.id.pull);
-        // shortcut: only knows the page's own scroll, so pages that scroll inside a div can trigger it mid-list; upgrade with a JS scrollTop check if that bites
-        pull.setOnChildScrollUpCallback((p, child) -> web == null || web.getScrollY() > 0);
+        // pull only when the finger went down with the page already at the very top (pullOk is set per touch)
+        pull.setOnChildScrollUpCallback((p, child) -> web == null || web.getScrollY() > 0 || !pullOk);
         pull.setOnRefreshListener(() -> web.reload());
         fullscreen = findViewById(R.id.fullscreen);
         bar = findViewById(R.id.bar);
@@ -1052,6 +1055,12 @@ public class MainActivity extends Activity {
                     blocked("เว็บที่คุณบล็อกไว้ (" + baseDomain(to.getHost()) + ")");
                     return true;
                 }
+                // a redirect, or a script jumping without a tap, to another site: let the user choose
+                String from = siteOf(view.getUrl());
+                if ((req.isRedirect() || !req.hasGesture()) && !from.isEmpty() && !from.equals(siteOf(to.toString()))) {
+                    askRedirect(view, to);
+                    return true;
+                }
                 return false;
             }
 
@@ -1152,6 +1161,12 @@ public class MainActivity extends Activity {
                 // getScale() is view pixels per CSS pixel (density times zoom)
                 touchX = e.getX() / w.getScale();
                 touchY = e.getY() / w.getScale();
+                pullOk = false;
+                int seq = ++touchSeq;
+                // sites that scroll inside a div keep getScrollY() at 0, so ask the page; until it answers, no pull
+                if (w.getScrollY() == 0) w.evaluateJavascript("(function(x,y){for(var e=document.elementFromPoint(x,y);e;e=e.parentElement)"
+                        + "if(e.scrollTop>0)return false;var s=document.scrollingElement;return !s||s.scrollTop<=0;})(" + touchX + "," + touchY + ")",
+                        r -> { if (seq == touchSeq) pullOk = "true".equals(r); });
             }
             return false;
         });
@@ -1822,6 +1837,18 @@ public class MainActivity extends Activity {
                     .show();
         });
         d.show();
+    }
+
+    private void askRedirect(WebView view, Uri to) {
+        if (redirectAsk != null && redirectAsk.isShowing()) return; // pages that keep firing jumps get one question
+        String site = baseDomain(to.getHost());
+        redirectAsk = new AlertDialog.Builder(this)
+                .setTitle("ลิงก์นี้จะพาไป " + site)
+                .setMessage(to.toString())
+                .setPositiveButton("ไป", (d, i) -> view.loadUrl(to.toString()))
+                .setNeutralButton("บล็อก", (d, i) -> blockSite(to.getHost()))
+                .setNegativeButton("ไม่ไป", null)
+                .show();
     }
 
     private void saveBlocked() {
